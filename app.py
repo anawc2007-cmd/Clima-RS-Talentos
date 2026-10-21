@@ -156,6 +156,29 @@ def criar_sessao():
 
 sessao_http = criar_sessao()
 
+def _get_open_meteo(url, tentativas=5):
+    """
+    GET no Open-Meteo com paciência: o IP do Render gratuito é compartilhado e
+    o Open-Meteo responde 429 (limite) com frequência. Espera cada vez mais.
+    """
+    import random
+    ultimo = None
+    for n in range(1, tentativas + 1):
+        try:
+            r = requests.get(url, timeout=30)
+            if r.status_code == 429:
+                ultimo = RuntimeError("Open-Meteo 429 (limite de requisições)")
+                espera = 20 * n + random.randint(0, 10)
+                log.warning(f"Open-Meteo 429; tentativa {n}/{tentativas}, aguardando {espera}s...")
+                time.sleep(espera)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            ultimo = e
+            time.sleep(5 * n)
+    raise ultimo
+
 # ==========================================================
 # OPEN-METEO: HOJE HORA A HORA
 # ==========================================================
@@ -172,7 +195,7 @@ def coletar_om_horario():
         f"&timezone=America/Sao_Paulo"
     )
     try:
-        dados = sessao_http.get(url, timeout=30).json()
+        dados = _get_open_meteo(url)
         h = dados["hourly"]
         # Total de chuva do dia = soma da precipitação de todas as horas
         chuva_dia = round(sum(v or 0 for v in h["precipitation"]), 1)
@@ -215,7 +238,7 @@ def coletar_om_diario():
         f"&timezone=America/Sao_Paulo"
     )
     try:
-        dados = sessao_http.get(url, timeout=30).json()
+        dados = _get_open_meteo(url)
         d = dados["daily"]
         linhas = []
         for i, dia in enumerate(d["time"]):
@@ -870,9 +893,7 @@ def _atualizar_om_historico():
         f"&past_days=30&forecast_days=1&timezone=America/Sao_Paulo"
     )
     try:
-        resp = sessao_http.get(url, timeout=30)
-        resp.raise_for_status()
-        h = resp.json()["hourly"]
+        h = _get_open_meteo(url)["hourly"]
         d = pd.DataFrame({
             "data":  pd.to_datetime(h["time"]).normalize(),
             "tmed":  h["temperature_2m"],
@@ -1748,10 +1769,14 @@ def atualizar_dados(forcar_inmet=False):
 # AGENDADOR
 # ==========================================================
 
+MINUTO_ATUALIZACAO = 7   # evita a hora cheia, quando os IPs compartilhados do Render lotam o Open-Meteo
+
 def proxima_execucao():
     agora = datetime.now()
-    base  = agora.replace(minute=0, second=0, microsecond=0)
-    return base + timedelta(hours=INTERVALO_ATUALIZACAO_HORAS)
+    alvo  = agora.replace(minute=MINUTO_ATUALIZACAO, second=0, microsecond=0)
+    while alvo <= agora:
+        alvo += timedelta(hours=INTERVALO_ATUALIZACAO_HORAS)
+    return alvo
 
 def agendador():
     while True:
