@@ -21,20 +21,23 @@
 #
 # O QUE MUDOU NESTA VERSÃO
 # ─────────────────────────────────────────────────────────
-#  • NOVO: nos gráficos que comparam várias séries (INMET × Open-Meteo ×
-#    Estação, as 3 cidades do INMET, hoje hora a hora), cada série agora tem
-#    cor + estilo de linha + formato de marcador próprios (círculo contínuo,
-#    quadrado traço-ponto, triângulo pontilhado). Vale para site, PDF e
-#    gráficos nativos do Google Sheets. Gráficos de uma série só ficam como
-#    estavam. Só visual: nenhuma coleta/API muda.
-#  • A aba "Gráficos" do Sheets usa a marca "layout-v4": é recriada uma única
-#    vez no próximo ciclo para aplicar os novos estilos.
+#  • CORREÇÃO (planilha parada): a escrita no Google Sheets agora
+#    - envia só as linhas mais recentes (SHEETS_MAX_LINHAS_TODAS e
+#      SHEETS_MAX_LINHAS_FONTE), para não estourar o limite de 10 milhões
+#      de células da planilha;
+#    - encolhe a grade da aba (resize) antes de limpar, liberando células;
+#    - escreve em blocos (SHEETS_TAMANHO_BLOCO linhas por chamada);
+#    - registra o erro completo no log (log.exception) em vez de engolir.
+#  • A primeira atualização agora roda em segundo plano, para o servidor
+#    abrir a porta logo (o Render não derruba o serviço por demora).
+#  • Mantido: nos gráficos que comparam várias séries, cada série tem cor +
+#    estilo de linha + formato de marcador próprios (site, PDF e Sheets).
+#  • A aba "Gráficos" do Sheets usa a marca "layout-v4".
 #  • Botão "Baixar PDF dos gráficos" (rota /graficos.pdf), desenhado no
 #    servidor com reportlab e guardado em cache até os dados mudarem.
-#  • Gráficos de comparação HOJE, hora a hora, Open-Meteo × Estação.
 #  • UMA lista de gráficos (_montar_graficos) alimenta site, PDF e Sheets.
-#  • Mantido: INMET pela API de tempo real (ZIP anual só como reserva),
-#    retries com backoff, Sheets só reescreve aba que mudou, /status.
+#  • INMET pela API de tempo real (ZIP anual só como reserva), retries com
+#    backoff, Sheets só reescreve aba que mudou, /status.
 # ==========================================================
 
 import io
@@ -94,6 +97,11 @@ GSHEETS_LINK        = os.environ.get(
     "GSHEETS_LINK",
     "https://docs.google.com/spreadsheets/d/1yDFMkt0-Buuijc1LwVc6Sj8Zixk74cc0izi0azvT5sA/edit?gid=192990081#gid=192990081",
 )
+
+# Limites de escrita no Sheets (evitam estourar o limite de 10 mi de células)
+SHEETS_MAX_LINHAS_TODAS = 1500   # linhas mais recentes de CADA fonte na aba "Todas"
+SHEETS_MAX_LINHAS_FONTE = 5000   # linhas mais recentes em cada aba individual
+SHEETS_TAMANHO_BLOCO    = 2000   # linhas por chamada de escrita
 
 # ── Estação Meteorológica (planilha externa, fonte adicional) ──────
 # Planilha DIFERENTE da de destino: onde a estação física registra os
@@ -691,7 +699,13 @@ def _hash_dataframe(df):
     return pd.util.hash_pandas_object(df.fillna("—").astype(str)).sum()
 
 def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False):
+    """
+    Reescreve uma aba inteira. Encolhe a grade antes de limpar (libera células
+    do limite de 10 milhões da planilha) e escreve em blocos para não passar
+    do limite de tamanho de cada requisição.
+    """
     import gspread
+    from gspread.utils import rowcol_to_a1
 
     novo_hash = _hash_dataframe(dados)
     if not pular_dedup and _hash_abas_enviadas.get(nome_aba) == novo_hash:
@@ -700,24 +714,31 @@ def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False
 
     dados_str = dados.fillna("—").astype(str)
     linhas    = [dados_str.columns.tolist()] + dados_str.values.tolist()
+    n_lin, n_col = len(linhas), len(dados_str.columns)
 
     for tentativa in range(1, tentativas + 1):
         try:
             try:
                 ws = sh.worksheet(nome_aba)
+                # Encolhe a grade ANTES de limpar: libera células do limite de 10 mi
+                ws.resize(rows=n_lin + 10, cols=n_col)
                 ws.clear()
             except gspread.exceptions.WorksheetNotFound:
-                ws = sh.add_worksheet(title=nome_aba, rows=len(linhas) + 10, cols=len(dados_str.columns))
-            ws.update(linhas)
+                ws = sh.add_worksheet(title=nome_aba, rows=n_lin + 10, cols=n_col)
+
+            for i in range(0, n_lin, SHEETS_TAMANHO_BLOCO):
+                ws.update(values=linhas[i:i + SHEETS_TAMANHO_BLOCO],
+                          range_name=rowcol_to_a1(i + 1, 1))
             _hash_abas_enviadas[nome_aba] = novo_hash
+            log.info(f"Aba '{nome_aba}' escrita: {n_lin - 1} linhas.")
             return
-        except gspread.exceptions.APIError as e:
+        except gspread.exceptions.APIError:
             espera = 5 * tentativa
-            log.warning(f"Rate limit/erro do Sheets na aba '{nome_aba}' (tentativa {tentativa}/{tentativas}); "
-                        f"aguardando {espera}s... ({e})")
+            log.exception(f"Erro do Sheets na aba '{nome_aba}' (tentativa {tentativa}/{tentativas}); "
+                          f"aguardando {espera}s...")
             time.sleep(espera)
-        except Exception as e:
-            log.error(f"Erro inesperado ao escrever aba '{nome_aba}': {e}")
+        except Exception:
+            log.exception(f"Erro inesperado ao escrever aba '{nome_aba}'")
             return
     log.error(f"Falha ao escrever aba '{nome_aba}' após {tentativas} tentativas.")
 
@@ -1490,7 +1511,7 @@ def _atualizar_aba_graficos(sh, dados):
         _marcar_diagnostico("Gráficos (aba)", True, len(graficos), f"{len(novos)} gráfico(s) criado(s)")
 
     except Exception as e:
-        log.error(f"Erro ao montar a aba de gráficos: {e}")
+        log.exception("Erro ao montar a aba de gráficos")
         _marcar_diagnostico("Gráficos (aba)", False, 0, str(e))
 
 def exportar_para_sheets(df):
@@ -1512,19 +1533,22 @@ def exportar_para_sheets(df):
             log.warning("Tabela principal vazia; nada para exportar neste ciclo.")
             return
 
-        _escrever_aba_com_retry(sh, "Todas", df)
+        # Só as linhas mais recentes de cada fonte, para não estourar o
+        # limite de 10 milhões de células da planilha.
+        df_todas = df.groupby("Estacao", sort=False, group_keys=False).tail(SHEETS_MAX_LINHAS_TODAS)
+        _escrever_aba_com_retry(sh, "Todas", df_todas)
 
         # Aba com TODOS os gráficos (mesma lista do site e do PDF)
         _atualizar_aba_graficos(sh, obter_graficos(df))
 
         for fonte in df["Estacao"].unique():
-            df_f = df[df["Estacao"] == fonte]
+            df_f = df[df["Estacao"] == fonte].tail(SHEETS_MAX_LINHAS_FONTE)
             cols = [c for c in df.columns if df_f[c].notna().any()]
             _escrever_aba_com_retry(sh, fonte[:100], df_f[cols])
 
         log.info(f"Google Sheets sincronizado: '{GSHEETS_NOME}'")
-    except Exception as e:
-        log.error(f"Erro ao exportar para Google Sheets: {e}")
+    except Exception:
+        log.exception("Erro ao exportar para Google Sheets")
 
 # ==========================================================
 # PDF DOS GRÁFICOS (reportlab, desenhado no servidor)
@@ -1731,8 +1755,8 @@ def agendador():
         time.sleep(max(segundos, 1))
         try:
             atualizar_dados()
-        except Exception as e:
-            log.error(f"Erro inesperado no ciclo de atualização: {e}")
+        except Exception:
+            log.exception("Erro inesperado no ciclo de atualização")
 
 # ==========================================================
 # FLASK
@@ -2155,8 +2179,10 @@ def gerar_linhas(df):
 # ==========================================================
 
 if __name__ == "__main__":
-    log.info("Buscando dados iniciais...")
-    atualizar_dados()
+    log.info("Buscando dados iniciais (em segundo plano)...")
+    # Em segundo plano: o servidor abre a porta logo, sem esperar a
+    # primeira coleta + exportação para o Sheets terminar.
+    threading.Thread(target=atualizar_dados, daemon=True).start()
 
     threading.Thread(target=agendador, daemon=True).start()
 
