@@ -247,6 +247,11 @@ def coletar_om_diario():
 
 _gspread_cliente_cache = None
 
+def _abrir_planilha(gc):
+    """Abre a planilha de destino pelo ID do GSHEETS_LINK (mais confiável que pelo nome)."""
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", GSHEETS_LINK or "")
+    return gc.open_by_key(m.group(1)) if m else gc.open(GSHEETS_NOME)
+
 def _obter_cliente_gspread():
     """
     Cria (uma única vez) e reutiliza o cliente autenticado do gspread,
@@ -269,6 +274,7 @@ def _obter_cliente_gspread():
     ]
     creds = Credentials.from_service_account_file(GSHEETS_CREDENCIAIS, scopes=escopos)
     _gspread_cliente_cache = gspread.authorize(creds)
+    log.info(f"Service Account em uso (compartilhe a planilha com este e-mail): {creds.service_account_email}")
     return _gspread_cliente_cache
 
 # ==========================================================
@@ -324,7 +330,7 @@ def coletar_dados_comunidade():
 
     try:
         gc = _obter_cliente_gspread()
-        sh = gc.open(GSHEETS_NOME)
+        sh = _abrir_planilha(gc)
         try:
             ws = sh.worksheet(DADOS_COMUNIDADE_ABA)
         except gspread.exceptions.WorksheetNotFound:
@@ -358,7 +364,7 @@ def _salvar_dados_comunidade(linhas):
     import gspread
 
     gc = _obter_cliente_gspread()
-    sh = gc.open(GSHEETS_NOME)
+    sh = _abrir_planilha(gc)
 
     colunas_envio = []
     for linha in linhas:
@@ -1527,7 +1533,7 @@ def exportar_para_sheets(df):
 
     try:
         gc = _obter_cliente_gspread()
-        sh = gc.open(GSHEETS_NOME)
+        sh = _abrir_planilha(gc)
 
         if df.empty:
             log.warning("Tabela principal vazia; nada para exportar neste ciclo.")
