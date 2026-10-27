@@ -1,5 +1,5 @@
 # ==========================================================
-# CLIMA UNIFICADO - INMET + OPEN-METEO
+# CLIMA UNIFICADO - INMET + OPEN-METEO (+ NOSSA ESTAÇÃO 3D)
 # Versão robusta para deploy no Render + Google Sheets
 #
 # COMO CONFIGURAR (leia antes de rodar):
@@ -21,6 +21,10 @@
 #
 # O QUE MUDOU NESTA VERSÃO
 # ─────────────────────────────────────────────────────────
+#  • NOVO: aba "NOSSA ESTAÇÃO" (rota /estacao-3d) com a estação em 3D e
+#    diagnóstico dos sensores (verde = OK, vermelho = problema), lendo as
+#    colunas "Status ..." da planilha da Estação Meteorológica. A API
+#    /api/estacao-status entrega o JSON usado pela página.
 #  • CORREÇÃO (planilha parada): a escrita no Google Sheets agora
 #    - envia só as linhas mais recentes (SHEETS_MAX_LINHAS_TODAS e
 #      SHEETS_MAX_LINHAS_FONTE), para não estourar o limite de 10 milhões
@@ -54,7 +58,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
-from flask import Flask, Response, request as flask_request
+from flask import Flask, Response, jsonify, request as flask_request
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -1874,6 +1878,9 @@ def inicio():
         url   = f"/?fonte={requests.utils.quote(fonte)}"
         botoes += f'<a href="{url}" class="btn {css} {ativo}">{ico} {fonte}</a>\n'
 
+    # Botão da estação em 3D (diagnóstico dos sensores)
+    botoes += '<a href="/estacao-3d" class="btn" style="background:#2e7d32;color:#fff;">🛰️ NOSSA ESTAÇÃO</a>\n'
+
     total   = len(df_atual)
     exibido = 0 if eh_graf else min(500, len(df_exibir))
     rodape_atualizacao = (
@@ -2167,6 +2174,295 @@ def modelo_comunidade_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=modelo-dados-comunidade.csv"},
     )
+
+# ==========================================================
+# ESTAÇÃO 3D — diagnóstico visual dos sensores (verde = OK, vermelho = problema)
+# ==========================================================
+# /estacao-3d          -> página com a estação em 3D (gira, aproxima, toque nos sensores)
+# /api/estacao-status  -> JSON com o status mais recente de cada sensor, lido da
+#                         aba "Estação Meteorológica" (colunas "Status ...").
+# A página consulta a API a cada 60 s, então as cores acompanham o ciclo do app.
+
+ESTACAO_SENSORES = {
+    "dht22":  {"chaves": ("DHT22",),           "valores": ("TEMP", "UMID")},
+    "bmp280": {"chaves": ("BMP280",),          "valores": ("PRESS",)},
+    "pluv":   {"chaves": ("PLUVI",),           "valores": ("CHUVA", "PLUV", "PRECIP")},
+    "anem":   {"chaves": ("ANEM",),            "valores": ("VENTO", "VELOC")},
+    "biruta": {"chaves": ("BIRUTA",),          "valores": ("DIREC", "DIREÇ")},
+    "nivel":  {"chaves": ("NIVEL", "NÍVEL"),   "valores": ("NIVEL", "NÍVEL")},
+}
+
+def _status_estacao():
+    vazio = {"sensores": {}, "leitura": None}
+    with tabela_lock:
+        df = tabela.copy()
+    if df.empty or "Estacao" not in df.columns:
+        return vazio
+    df = df[df["Estacao"] == "Estação Meteorológica"].dropna(axis=1, how="all")
+    if df.empty:
+        return vazio
+
+    linha = df.iloc[-1]  # última linha da aba = leitura mais recente
+    sensores = {}
+    for sid, cfg in ESTACAO_SENSORES.items():
+        col_status = next(
+            (c for c in df.columns
+             if "STATUS" in str(c).upper() and any(k in str(c).upper() for k in cfg["chaves"])),
+            None,
+        )
+        if col_status is None:
+            continue
+        bruto  = str(linha[col_status]).strip()
+        up     = bruto.upper()
+        estado = "ok" if up == "OK" else ("erro" if up in ("ERRO", "TRAVADO") else "desc")
+
+        valores = {}
+        for c in df.columns:
+            nome = str(c).upper()
+            if "STATUS" in nome or c == "Estacao":
+                continue
+            if any(k in nome for k in cfg["valores"]):
+                v = str(linha[c]).strip()
+                if v and v.lower() != "nan":
+                    valores[str(c)] = v
+            if len(valores) >= 3:
+                break
+        sensores[sid] = {"estado": estado, "rotulo": bruto, "valores": valores}
+
+    col_d = encontrar_coluna(df.columns, "DATA")
+    col_h = encontrar_coluna(df.columns, "HORA")
+    leitura = " ".join(str(linha[c]) for c in (col_d, col_h) if c)
+    return {"sensores": sensores, "leitura": leitura or None}
+
+@app.route("/api/estacao-status")
+def api_estacao_status():
+    return jsonify(_status_estacao())
+
+@app.route("/estacao-3d")
+def estacao_3d():
+    return ESTACAO_3D_HTML
+
+ESTACAO_3D_HTML = r"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NOSSA ESTAÇÃO — Diagnóstico 3D</title>
+<style>
+html,body{margin:0;height:100%;font-family:Arial,sans-serif;background:#bfe0f5;overflow:hidden}
+#c{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+.topo{position:fixed;top:0;left:0;right:0;z-index:2;padding:8px 12px;background:rgba(255,255,255,.9);font-size:13px;display:flex;justify-content:space-between;gap:10px}
+.topo a{color:#1565C0;font-weight:bold;text-decoration:none;white-space:nowrap}
+#rodape{position:fixed;left:8px;right:8px;bottom:8px;z-index:2;display:flex;flex-direction:column;gap:6px}
+#info{background:rgba(255,255,255,.93);border-left:6px solid #9e9e9e;border-radius:10px;padding:8px 12px;font-size:13px;line-height:1.5}
+#lista{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:#fff;border:2px solid #9e9e9e;border-radius:18px;padding:6px 10px;font-size:12px;font-weight:bold;cursor:pointer}
+.chip i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:#9e9e9e}
+</style>
+</head>
+<body>
+<div class="topo"><a href="/">← Tabela</a><b>🛰️ NOSSA ESTAÇÃO</b><span id="resumo">carregando…</span></div>
+<canvas id="c"></canvas>
+<div id="rodape"><div id="info">Arraste para girar. Toque num sensor para ver o diagnóstico.</div><div id="lista"></div></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function(){
+const NOMES={dht22:"DHT22 · temperatura e umidade",bmp280:"BMP280 · pressão",pluv:"Pluviômetro",anem:"Anemômetro",biruta:"Biruta",nivel:"Sensor de nível"};
+const COR={ok:0x2ecc71,erro:0xe53935,desc:0x9e9e9e};
+const HEX={ok:"#2ecc71",erro:"#e53935",desc:"#9e9e9e"};
+const TXT={ok:"#1b8f4a",erro:"#c62828",desc:"#666"};
+let dados={sensores:{}},sel=null,alvo=null;
+
+const cv=document.getElementById("c");
+const R=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+R.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+const S=new THREE.Scene();S.background=new THREE.Color(0x5b93ea);
+const cam=new THREE.PerspectiveCamera(45,1,.1,100);cam.position.set(4.6,2.6,6);
+const ctl=new THREE.OrbitControls(cam,cv);
+ctl.target.set(0,1.6,0);ctl.maxPolarAngle=1.5;ctl.minDistance=1.2;ctl.maxDistance=14;ctl.enableDamping=true;
+S.add(new THREE.HemisphereLight(0xffffff,0x557744,.9));
+const sol=new THREE.DirectionalLight(0xffffff,.9);sol.position.set(4,7,5);sol.castShadow=true;sol.shadow.mapSize.set(2048,2048);
+Object.assign(sol.shadow.camera,{left:-4,right:4,top:4,bottom:-4,near:1,far:20});sol.shadow.camera.updateProjectionMatrix();sol.shadow.bias=-.0005;S.add(sol);R.shadowMap.enabled=true;
+
+const mat=(c,o)=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.65},o||{}));
+const PRETO=mat(0x161616),BRANCO=mat(0xf4f4f2),METAL=mat(0x9aa0a6,{metalness:.6,roughness:.4});
+const B=(w,h,d)=>new THREE.BoxGeometry(w,h,d);
+const C=(rt,rb,h,n)=>new THREE.CylinderGeometry(rt,rb,h,n||20);
+const V=(x,y,z)=>new THREE.Vector3(x,y,z);
+function add(geo,m,x,y,z,pai){const o=new THREE.Mesh(geo,m);o.position.set(x||0,y||0,z||0);o.castShadow=true;o.receiveShadow=true;(pai||S).add(o);return o}
+function tubo(a,b,s,m){const d=new THREE.Vector3().subVectors(b,a);const o=new THREE.Mesh(B(s,d.length(),s),m);
+  o.position.copy(a).addScaledVector(d,.5);o.quaternion.setFromUnitVectors(V(0,1,0),d.clone().normalize());o.castShadow=true;S.add(o);return o}
+function tex(w,h,fn){const c=document.createElement("canvas");c.width=w;c.height=h;fn(c.getContext("2d"),w,h);return new THREE.CanvasTexture(c)}
+function plano(w,h,t,x,y,z){const o=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshBasicMaterial({map:t}));o.position.set(x,y,z);S.add(o);return o}
+
+/* cenário: gramado, terra e prédio com faixa azul ao fundo */
+const chao=add(new THREE.CircleGeometry(20,48),mat(0x6f8f3a,{roughness:1}),0,0,0);chao.rotation.x=-Math.PI/2;chao.castShadow=false;
+[[-3,-2.5,1.3],[2.8,-3.5,1.7]].forEach(p=>{const t=add(new THREE.CircleGeometry(p[2],24),mat(0x9a5a3c,{roughness:1}),p[0],.005,p[1]);t.rotation.x=-Math.PI/2;t.castShadow=false});
+add(B(24,4.4,.3),mat(0xf1f2f0),0,2.2,-7);
+add(B(24,.4,.5),mat(0x1f4fa8),0,3.95,-6.85);
+for(let r=0;r<2;r++)for(let i=-4;i<=4;i++){
+  add(B(1.9,1,.05),mat(0xf4f4f4),i*2.6,1+r*1.5,-6.82);
+  add(B(1.78,.88,.06),mat(0x34495c,{roughness:.15,metalness:.3}),i*2.6,1+r*1.5,-6.8)}
+
+/* mastro quadrado preto, tripé de tubo quadrado, bandeja da bateria */
+add(B(.05,2.95,.05),PRETO,0,1.525,0);
+add(B(.06,.01,.06),PRETO,0,3.005,0);
+[90,210,330].forEach(d=>{const a=d*Math.PI/180;tubo(V(0,.85,0),V(Math.cos(a)*1.05,.02,Math.sin(a)*1.05),.045,PRETO)});
+tubo(V(.11,.9,.2),V(.11,.68,.2),.025,PRETO);
+add(B(.34,.02,.28),PRETO,0,.9,.14);
+add(B(.34,.04,.01),PRETO,0,.93,.275);
+add(B(.01,.04,.28),PRETO,-.165,.93,.14);add(B(.01,.04,.28),PRETO,.165,.93,.14);
+tubo(V(.03,2.92,0),V(.03,1.4,.04),.008,PRETO);                 /* cabo descendo pelo mastro */
+
+/* bateria Freedom DF700 com tampa branca e cinta preta */
+const texBat=tex(256,128,(g,w,h)=>{g.fillStyle="#111";g.fillRect(0,0,w,h);g.fillStyle="#fff";g.font="italic bold 38px Arial";
+  g.fillText("FREEDOM",12,48);g.font="14px Arial";g.fillText("ESTACIONÁRIA",14,70);g.fillStyle="#d8232a";g.fillRect(150,84,100,6);
+  g.fillStyle="#fff";g.font="bold 20px Arial";g.fillText("DF700",14,112)});
+add(B(.24,.17,.17),mat(0xc8201e,{roughness:.5}),0,.995,.125);
+plano(.2,.1,texBat,0,.99,.2105);
+add(B(.02,.176,.174),PRETO,-.06,.995,.125);
+add(B(.27,.025,.19),BRANCO,0,1.0925,.125);
+add(B(.272,.007,.192),PRETO,0,1.095,.125);
+
+/* caixa Brasiltec com tampa transparente: controlador solar, placa e cabos por dentro */
+const texCtl=tex(128,80,(g,w,h)=>{g.fillStyle="#2c7fd6";g.fillRect(0,0,w,h);g.fillStyle="#cfe0d0";g.fillRect(40,14,50,30);
+  g.fillStyle="#222";g.font="bold 22px Arial";g.fillText("14.3V",44,38);g.fillStyle="#fff";g.font="7px Arial";
+  g.fillText("SOLAR CHARGE CONTROLLER",18,9);g.fillStyle="#111";[34,64,94].forEach(x=>{g.beginPath();g.arc(x,62,7,0,6.3);g.fill()});
+  g.fillStyle="#333";g.fillRect(98,16,20,20)});
+add(B(.2,.3,.07),mat(0xd6dadd),0,1.255,.06);
+const lid=add(B(.2,.3,.05),mat(0xdceaf2,{transparent:true,opacity:.18,roughness:.05}),0,1.255,.12);lid.castShadow=false;lid.material.depthWrite=false;
+[[-.103,1.33],[-.103,1.18],[.103,1.33],[.103,1.18]].forEach(p=>add(B(.012,.045,.03),BRANCO,p[0],p[1],.1));
+add(B(.1,.065,.02),mat(0x111111),0,1.34,.105);
+plano(.092,.058,texCtl,0,1.34,.1155);
+add(B(.13,.1,.006),mat(0xa65f33),0,1.2,.098);
+add(B(.04,.04,.008),mat(0x2f68b8),-.04,1.205,.105);
+add(B(.05,.03,.008),mat(0x20262b),.015,1.215,.105);
+add(B(.03,.02,.003),METAL,.02,1.215,.11);
+for(let k=0;k<4;k++)add(B(.014,.016,.012),mat(0x2faa4a),-.055+k*.016,1.145,.103);
+add(new THREE.TorusGeometry(.065,.003,6,28),mat(0x62aee0),-.02,1.19,.115);
+add(new THREE.TorusGeometry(.075,.0035,6,28),mat(0x6b4a3a),.01,1.16,.118);
+add(B(.02,.1,.002),mat(0xe0cfa0),.01,1.19,.122).rotation.z=.55;
+add(new THREE.SphereGeometry(.004,8,6),new THREE.MeshBasicMaterial({color:0x3a6bff}),0,1.225,.11);
+
+/* painel solar inclinado, no lado oposto da caixa, com moldura preta */
+const texPv=tex(128,160,(g,w,h)=>{g.fillStyle="#1d3b8a";g.fillRect(0,0,w,h);g.strokeStyle="#8fb0e8";g.lineWidth=1.5;
+  for(let i=0;i<=6;i++){g.beginPath();g.moveTo(i*w/6,0);g.lineTo(i*w/6,h);g.stroke()}
+  for(let j=0;j<=8;j++){g.beginPath();g.moveTo(0,j*h/8);g.lineTo(w,j*h/8);g.stroke()}});
+const pg=new THREE.Group();pg.position.set(0,1.53,-.03);pg.rotation.x=-.45;S.add(pg);
+add(B(.39,.012,.31),METAL,0,-.006,-.15,pg);
+add(B(.38,.018,.3),mat(0x1f3b8f,{metalness:.3,roughness:.3}),0,.002,-.15,pg);
+const pv=new THREE.Mesh(new THREE.PlaneGeometry(.36,.28),new THREE.MeshStandardMaterial({map:texPv,roughness:.3,metalness:.2}));
+pv.rotation.x=-Math.PI/2;pv.position.set(0,.0115,-.15);pg.add(pv);
+[-.1,.1].forEach(x=>tubo(V(x,1.5,-.03),V(x,1.4,-.25),.012,PRETO));
+
+/* abraçadeiras, suporte do pluviômetro e haste do braço do anemômetro */
+add(B(.062,.022,.062),METAL,0,1.74,0);
+add(B(.062,.022,.062),METAL,0,1.67,0);
+add(B(.07,.014,.14),BRANCO,0,1.74,.1);
+add(B(.45,.022,.03),BRANCO,-.225,2.95,0);
+add(B(.07,.04,.07),BRANCO,0,2.96,0);
+add(C(.02,.02,.2,12),PRETO,-.45,2.95,0);
+
+/* sensores: cada um é um grupo com um "halo" colorido (verde/vermelho) */
+const SN={};
+function novo(id,x,y,z,r){const g=new THREE.Group();g.position.set(x,y,z);g.userData.id=id;
+  const h=new THREE.Mesh(new THREE.SphereGeometry(r,16,12),new THREE.MeshBasicMaterial({color:COR.desc,transparent:true,opacity:.28,depthWrite:false}));
+  g.add(h);S.add(g);SN[id]={g:g,h:h,mats:[],giro:null,estado:"desc"};return SN[id]}
+function parte(id,geo,cor,x,y,z,pai){const m=mat(cor);SN[id].mats.push(m);return add(geo,m,x,y,z,pai||SN[id].g)}
+
+/* anemômetro (conchas) no alto, na ponta do braço branco */
+let s=novo("anem",-.45,3.07,0,.11);
+parte("anem",C(.022,.03,.07,16),0x1a1a1a,0,-.02,0);
+const rot=new THREE.Group();rot.position.y=.03;s.g.add(rot);s.giro=rot;
+parte("anem",C(.005,.005,.03,8),0xcccccc,0,.01,0,rot);
+for(let k=0;k<3;k++){const a=k*2*Math.PI/3,c=Math.cos(a),n=Math.sin(a);
+  parte("anem",B(.07,.006,.006),0xe8e8e8,c*.035,0,n*.035,rot).rotation.y=-a;
+  parte("anem",new THREE.SphereGeometry(.026,12,8,0,Math.PI*2,0,Math.PI/2),0xffffff,c*.07,0,n*.07,rot).rotation.x=Math.PI/2}
+
+/* biruta logo abaixo do anemômetro: aleta larga + haste */
+s=novo("biruta",-.45,2.86,0,.1);
+parte("biruta",C(.022,.018,.06,16),0x1a1a1a,0,.02,0);
+const sw=new THREE.Group();sw.position.y=-.02;s.g.add(sw);s.giro=sw;
+parte("biruta",B(.22,.008,.008),0xf2f2f2,.02,0,0,sw);
+parte("biruta",B(.075,.045,.004),0xffffff,-.08,0,0,sw);
+
+/* pluviômetro branco no suporte em L, com etiqueta azul */
+s=novo("pluv",0,1.84,.125,.14);
+parte("pluv",C(.06,.06,.17,28),0xffffff,0,0,0);
+parte("pluv",C(.078,.078,.022,28),0xeeeeea,0,.085,0);
+add(C(.062,.062,.003,28),PRETO,0,.097,0,s.g);
+add(B(.002,.02,.05),mat(0x1f5fbf),.061,-.025,0,s.g);
+add(C(.008,.008,.002,16),mat(0x2aa84a),.062,-.025,.015,s.g).rotation.z=Math.PI/2;
+
+/* DHT22 dentro do abrigo anti-radiação (pratos empilhados) */
+s=novo("dht22",0,1.63,.09,.11);
+for(let k=0;k<5;k++)parte("dht22",C(.032,.062,.012,24),0xffffff,0,.04-k*.02,0);
+parte("dht22",C(.012,.012,.1,10),0xdddddd,0,0,0);
+add(B(.03,.018,.05),BRANCO,0,.04,-.05,s.g);
+add(B(.02,.13,.004),BRANCO,0,-.1,-.062,s.g);
+
+/* BMP280 na placa, dentro da caixa */
+s=novo("bmp280",.045,1.165,.108,.06);
+parte("bmp280",B(.02,.02,.006),0xb8bcc2,0,0,0);
+
+/* nível: halo na bateria (ver observação na resposta) */
+novo("nivel",0,.995,.125,.19);
+
+/* lista de botões */
+const lista=document.getElementById("lista"),info=document.getElementById("info"),chips={};
+Object.keys(NOMES).forEach(id=>{const d=document.createElement("div");d.className="chip";
+  d.innerHTML="<i></i>"+NOMES[id].split(" · ")[0];d.onclick=()=>selecionar(id);lista.appendChild(d);chips[id]=d});
+
+function esc(t){return String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+
+function mostrar(id){const d=dados.sensores[id],st=d?d.estado:"desc";
+  info.style.borderLeftColor=HEX[st];
+  const simb=st==="ok"?"✔ ":st==="erro"?"✖ ":"? ";
+  let h="<b>"+NOMES[id]+"</b><br><span style=\"color:"+TXT[st]+";font-weight:bold\">"+(d?simb+esc(d.rotulo||"sem status"):"Sem dado na planilha")+"</span>";
+  if(d)for(const k in d.valores)h+="<br>"+esc(k)+": "+esc(d.valores[k]);
+  info.innerHTML=h}
+
+function selecionar(id){sel=id;mostrar(id);alvo=SN[id].g.position.clone();
+  for(const k in SN)SN[k].h.scale.setScalar(k===id?1.35:1)}
+
+function aplicar(){let ok=0,tot=0;
+  for(const id in SN){const d=dados.sensores[id],st=d?d.estado:"desc",c=COR[st],x=SN[id];x.estado=st;
+    x.h.material.color.setHex(c);
+    x.mats.forEach(m=>{m.emissive.setHex(c);m.emissiveIntensity=.4});
+    chips[id].firstChild.style.background=HEX[st];chips[id].style.borderColor=HEX[st];
+    if(d){tot++;if(st==="ok")ok++}}
+  document.getElementById("resumo").textContent=tot?(ok+" de "+tot+" sensores OK"+(dados.leitura?" · leitura: "+dados.leitura:"")):"Sem dados da estação";
+  if(sel)mostrar(sel)}
+
+async function carregar(){
+  try{const r=await fetch("/api/estacao-status");dados=await r.json()}catch(e){dados={sensores:{}}}
+  aplicar()}
+carregar();setInterval(carregar,60000);
+
+/* toque/clique num sensor (ignora arrastes) */
+const ray=new THREE.Raycaster(),pt=new THREE.Vector2();let p0=null;
+cv.addEventListener("pointerdown",e=>{p0=[e.clientX,e.clientY]});
+cv.addEventListener("pointerup",e=>{
+  if(!p0||Math.hypot(e.clientX-p0[0],e.clientY-p0[1])>6)return;
+  pt.set(e.clientX/innerWidth*2-1,-(e.clientY/innerHeight)*2+1);ray.setFromCamera(pt,cam);
+  const hit=ray.intersectObjects(Object.values(SN).map(v=>v.g),true)[0];
+  if(hit){let o=hit.object;while(o&&!(o.userData&&o.userData.id))o=o.parent;if(o)selecionar(o.userData.id)}});
+
+function ajustar(){const w=innerWidth,h=innerHeight;R.setSize(w,h,false);cam.aspect=w/h;cam.fov=w<h?62:45;cam.updateProjectionMatrix()}
+addEventListener("resize",ajustar);ajustar();
+
+const t0=performance.now();
+(function anima(){requestAnimationFrame(anima);const t=(performance.now()-t0)/1000;
+  if(SN.anem.estado==="ok")SN.anem.giro.rotation.y+=.08;          /* travado = parado */
+  if(SN.biruta.estado==="ok")SN.biruta.giro.rotation.y=Math.sin(t*.8)*.7;
+  for(const k in SN){const v=SN[k];v.h.material.opacity=v.estado==="erro"?.22+.2*Math.sin(t*5):.28}
+  if(alvo){ctl.target.lerp(alvo,.1);if(ctl.target.distanceTo(alvo)<.02)alvo=null}
+  ctl.update();R.render(S,cam)})();
+})();
+</script>
+</body>
+</html>"""
 
 @app.route("/status")
 def status():
