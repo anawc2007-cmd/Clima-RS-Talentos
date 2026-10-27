@@ -160,7 +160,7 @@ def criar_sessao():
 
 sessao_http = criar_sessao()
 
-def _get_open_meteo(url, tentativas=5):
+def _get_open_meteo(url, tentativas=3):
     """
     GET no Open-Meteo com paciência: o IP do Render gratuito é compartilhado e
     o Open-Meteo responde 429 (limite) com frequência. Espera cada vez mais.
@@ -172,7 +172,7 @@ def _get_open_meteo(url, tentativas=5):
             r = requests.get(url, timeout=30)
             if r.status_code == 429:
                 ultimo = RuntimeError("Open-Meteo 429 (limite de requisições)")
-                espera = 20 * n + random.randint(0, 10)
+                espera = 10 * n + random.randint(0, 5)
                 log.warning(f"Open-Meteo 429; tentativa {n}/{tentativas}, aguardando {espera}s...")
                 time.sleep(espera)
                 continue
@@ -701,8 +701,14 @@ def montar_tabela(forcar_inmet=False):
     """
     global _ultimo_bloco_inmet
 
-    df_hora       = coletar_om_horario()
-    df_prev       = coletar_om_diario()
+    def _unir(lista):
+        lista = [d for d in lista if not d.empty]
+        if not lista:
+            return pd.DataFrame()
+        t = pd.concat(lista, ignore_index=True)
+        return t[["Estacao"] + [c for c in t.columns if c != "Estacao"]]
+
+    # 1) Fontes rápidas primeiro (planilhas e INMET)
     df_estacao    = coletar_estacao_meteorologica()
     df_comunidade = coletar_dados_comunidade()
 
@@ -711,16 +717,23 @@ def montar_tabela(forcar_inmet=False):
         _ultimo_bloco_inmet = df_inmet_novo
     else:
         log.info("INMET: usando o último bloco de dados válido dessa fonte (nenhuma novidade neste ciclo).")
-
     df_inmet = _ultimo_bloco_inmet
 
-    partes = [df for df in [df_hora, df_prev, df_estacao, df_comunidade, df_inmet] if not df.empty]
-    if not partes:
-        return pd.DataFrame()
+    # Publica já uma tabela parcial, se o site ainda estiver vazio: assim a
+    # página abre sem esperar o Open-Meteo (que pode demorar por causa do 429).
+    global tabela, ultima_atualizacao
+    parcial = _unir([df_estacao, df_comunidade, df_inmet])
+    with tabela_lock:
+        if tabela.empty and not parcial.empty:
+            tabela = parcial
+            ultima_atualizacao = datetime.now()
+            log.info(f"Tabela parcial publicada ({len(parcial)} registros), sem esperar o Open-Meteo.")
 
-    tabela_montada = pd.concat(partes, ignore_index=True)
-    cols = ["Estacao"] + [c for c in tabela_montada.columns if c != "Estacao"]
-    return tabela_montada[cols]
+    # 2) Open-Meteo por último (lento quando há 429)
+    df_hora = coletar_om_horario()
+    df_prev = coletar_om_diario()
+
+    return _unir([df_hora, df_prev, df_estacao, df_comunidade, df_inmet])
 
 # ==========================================================
 # GOOGLE SHEETS — abas de dados
@@ -1829,7 +1842,8 @@ def inicio():
         df_atual = tabela.copy()
 
     if df_atual.empty:
-        return "<h1>Buscando os dados pela primeira vez... atualize a página em alguns segundos.</h1>"
+        return ('<meta charset="UTF-8"><meta http-equiv="refresh" content="10">'
+                '<h1>Buscando os dados pela primeira vez... a página atualiza sozinha.</h1>')
 
     # As duas abas do Open-Meteo aparecem sempre, mesmo se a coleta falhou
     fixas       = ["Open-Meteo – Hoje (horário)", "Open-Meteo – Previsão (diária)"]
