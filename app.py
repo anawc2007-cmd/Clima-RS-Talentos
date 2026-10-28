@@ -1,3 +1,20 @@
+Claude
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+App · PY
 # ==========================================================
 # CLIMA UNIFICADO - INMET + OPEN-METEO (+ NOSSA ESTAÇÃO 3D)
 # Versão robusta para deploy no Render + Google Sheets
@@ -21,6 +38,10 @@
 #
 # O QUE MUDOU NESTA VERSÃO
 # ─────────────────────────────────────────────────────────
+#  • NOVO: a tabela e o Google Sheets da "Estação Meteorológica" agora
+#    recebem 1 linha POR HORA (a última leitura de cada hora; a chuva é a
+#    soma da hora). As leituras minuto a minuto continuam guardadas só na
+#    memória (_estacao_completa) para os gráficos e o diagnóstico 3D.
 #  • NOVO: aba "NOSSA ESTAÇÃO" (rota /estacao-3d) com a estação em 3D e
 #    diagnóstico dos sensores (verde = OK, vermelho = problema), lendo as
 #    colunas "Status ..." da planilha da Estação Meteorológica. A API
@@ -43,7 +64,7 @@
 #  • INMET pela API de tempo real (ZIP anual só como reserva), retries com
 #    backoff, Sheets só reescreve aba que mudou, /status.
 # ==========================================================
-
+ 
 import io
 import logging
 import math
@@ -55,44 +76,44 @@ import threading
 import time
 import zipfile
 from datetime import date, datetime, timedelta
-
+ 
 import pandas as pd
 import requests
 from flask import Flask, Response, jsonify, request as flask_request
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
+ 
 # ==========================================================
 # LOGGING
 # ==========================================================
-
+ 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d/%m/%Y %H:%M:%S",
 )
 log = logging.getLogger("clima")
-
+ 
 # ==========================================================
 # ⚙️  CONFIGURAÇÕES PRINCIPAIS
 # ==========================================================
-
+ 
 LATITUDE  = -30.0397
 LONGITUDE = -52.8930
-
+ 
 ESTACOES = {
     "B822":  "Cachoeira do Sul",
     "A803":  "Santa Maria Automática",
     "83936": "Santa Maria Convencional",
 }
-
+ 
 ANO_ATUAL = date.today().year
 URL_INMET_BASE = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{ano}.zip"
-
+ 
 # De quantas em quantas horas o ciclo de atualização roda (Open-Meteo e
 # INMET API de tempo real). O ZIP anual só entra como reserva.
 INTERVALO_ATUALIZACAO_HORAS = 1
-
+ 
 # ── Google Sheets ────────────────────────────────────────
 GSHEETS_ATIVO       = True
 GSHEETS_CREDENCIAIS = os.environ.get("GSHEETS_CREDENCIAIS_PATH", "/etc/secrets/credenciais.json")
@@ -101,12 +122,12 @@ GSHEETS_LINK        = os.environ.get(
     "GSHEETS_LINK",
     "https://docs.google.com/spreadsheets/d/1yDFMkt0-Buuijc1LwVc6Sj8Zixk74cc0izi0azvT5sA/edit?gid=192990081#gid=192990081",
 )
-
+ 
 # Limites de escrita no Sheets (evitam estourar o limite de 10 mi de células)
 SHEETS_MAX_LINHAS_TODAS = 1500   # linhas mais recentes de CADA fonte na aba "Todas"
 SHEETS_MAX_LINHAS_FONTE = 5000   # linhas mais recentes em cada aba individual
 SHEETS_TAMANHO_BLOCO    = 2000   # linhas por chamada de escrita
-
+ 
 # ── Estação Meteorológica (planilha externa, fonte adicional) ──────
 # Planilha DIFERENTE da de destino: onde a estação física registra os
 # dados. O app só LÊ dela e copia para a tabela unificada.
@@ -116,11 +137,11 @@ ESTACAO_METEO_SHEET_ID = os.environ.get(
 )
 # Nome da aba a ler. Deixe em branco para usar a primeira aba.
 ESTACAO_METEO_ABA = os.environ.get("ESTACAO_METEO_ABA", "")
-
+ 
 # ==========================================================
 # FONTE → CLASSE CSS
 # ==========================================================
-
+ 
 FONTE_CSS = {
     "Open-Meteo – Hoje (horário)":       "src-om-hora",
     "Open-Meteo – Previsão (diária)":    "src-om-prev",
@@ -130,7 +151,7 @@ FONTE_CSS = {
     "Estação Meteorológica":             "src-estacao-meteo",
     "Dados da Comunidade":               "src-comunidade",
 }
-
+ 
 # ── Dados da Comunidade (formulário público em /adicionar) ─────────
 # Cada envio é gravado numa aba própria ("Dados da Comunidade") dentro
 # da MESMA planilha de destino, relida a cada ciclo.
@@ -140,11 +161,11 @@ CAMPOS_COMUNIDADE = [
     "Temperatura (°C)", "Umidade (%RH)", "Vento (km/h)",
     "Precip. (mm)", "Radiação Solar (W/m²)", "Observação",
 ]
-
+ 
 # ==========================================================
 # SESSÃO HTTP COM RETRY/BACKOFF
 # ==========================================================
-
+ 
 def criar_sessao():
     sessao = requests.Session()
     retry = Retry(
@@ -157,9 +178,9 @@ def criar_sessao():
     sessao.mount("https://", adaptador)
     sessao.mount("http://", adaptador)
     return sessao
-
+ 
 sessao_http = criar_sessao()
-
+ 
 def _get_open_meteo(url, tentativas=3):
     """
     GET no Open-Meteo com paciência: o IP do Render gratuito é compartilhado e
@@ -182,11 +203,11 @@ def _get_open_meteo(url, tentativas=3):
             ultimo = e
             time.sleep(5 * n)
     raise ultimo
-
+ 
 # ==========================================================
 # OPEN-METEO: HOJE HORA A HORA
 # ==========================================================
-
+ 
 def coletar_om_horario():
     log.info("Buscando Open-Meteo – hoje hora a hora...")
     hoje = date.today().isoformat()
@@ -225,11 +246,11 @@ def coletar_om_horario():
         log.error(f"Erro Open-Meteo horário: {e}")
         _marcar_diagnostico("Open-Meteo – Hoje (horário)", False, 0, str(e))
         return pd.DataFrame()
-
+ 
 # ==========================================================
 # OPEN-METEO: PREVISÃO DIÁRIA (próximos 16 dias)
 # ==========================================================
-
+ 
 def coletar_om_diario():
     log.info("Buscando Open-Meteo – previsão diária...")
     url = (
@@ -267,18 +288,18 @@ def coletar_om_diario():
         log.error(f"Erro Open-Meteo diário: {e}")
         _marcar_diagnostico("Open-Meteo – Previsão (diária)", False, 0, str(e))
         return pd.DataFrame()
-
+ 
 # ==========================================================
 # GSPREAD — CLIENTE COMPARTILHADO
 # ==========================================================
-
+ 
 _gspread_cliente_cache = None
-
+ 
 def _abrir_planilha(gc):
     """Abre a planilha de destino pelo ID do GSHEETS_LINK (mais confiável que pelo nome)."""
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", GSHEETS_LINK or "")
     return gc.open_by_key(m.group(1)) if m else gc.open(GSHEETS_NOME)
-
+ 
 def _obter_cliente_gspread():
     """
     Cria (uma única vez) e reutiliza o cliente autenticado do gspread,
@@ -288,13 +309,13 @@ def _obter_cliente_gspread():
     global _gspread_cliente_cache
     if _gspread_cliente_cache is not None:
         return _gspread_cliente_cache
-
+ 
     import gspread
     from google.oauth2.service_account import Credentials
-
+ 
     if not os.path.exists(GSHEETS_CREDENCIAIS):
         raise RuntimeError(f"Credenciais não encontradas em {GSHEETS_CREDENCIAIS}")
-
+ 
     escopos = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -303,25 +324,58 @@ def _obter_cliente_gspread():
     _gspread_cliente_cache = gspread.authorize(creds)
     log.info(f"Service Account em uso (compartilhe a planilha com este e-mail): {creds.service_account_email}")
     return _gspread_cliente_cache
-
+ 
 # ==========================================================
 # ESTAÇÃO METEOROLÓGICA (planilha externa, fonte adicional)
 # ==========================================================
-
+ 
+_estacao_completa = pd.DataFrame()   # leituras minuto a minuto (só em memória)
+ 
+def _reduzir_para_horario(df):
+    """
+    Mantém 1 linha por hora (a última leitura de cada hora).
+    A chuva da linha vira a SOMA da hora, para não perder precipitação.
+    """
+    norm = {c: _normalizar_texto(c) for c in df.columns}
+    c_data = next((c for c, n in norm.items() if "data" in n), None)
+    c_hora = next((c for c, n in norm.items() if "hora" in n), None)
+    if c_data is None or c_hora is None:
+        return df                      # sem data/hora não dá para agrupar
+ 
+    hora = df[c_hora].astype(str).str.extract(r"(\d{1,2})")[0].fillna("")
+    chave = df[c_data].astype(str) + " " + hora
+ 
+    reduzido = df.loc[~chave.duplicated(keep="last")].copy()
+ 
+    c_chuva = next((c for c, n in norm.items()
+                    if any(t in n for t in ("precipita", "chuva", "pluv")) and "status" not in n), None)
+    if c_chuva:
+        soma = (pd.to_numeric(df[c_chuva].astype(str).str.replace(",", ".", regex=False),
+                              errors="coerce")
+                .groupby(chave).sum(min_count=1))
+        reduzido[c_chuva] = chave.loc[reduzido.index].map(soma)
+    return reduzido
+ 
 def coletar_estacao_meteorologica():
     """
     Lê os dados da planilha da estação meteorológica física e devolve
     como DataFrame, com a coluna "Estacao" preenchida.
-
+ 
+    A planilha tem 1 leitura por minuto. A base completa fica em memória
+    (_estacao_completa) para os gráficos e o diagnóstico 3D; a tabela e o
+    Google Sheets recebem só 1 linha por hora.
+ 
     IMPORTANTE: essa planilha precisa estar compartilhada (Leitor ou
     Editor) com o e-mail da Service Account — senão a leitura falha.
-
+ 
     Se a planilha tiver coluna de radiação solar, ela entra
     automaticamente junto com as demais colunas.
     """
+    global _estacao_completa
+ 
     if not ESTACAO_METEO_SHEET_ID:
         return pd.DataFrame()
-
+ 
     log.info("Buscando dados da Estação Meteorológica (planilha externa)...")
     try:
         gc = _obter_cliente_gspread()
@@ -332,19 +386,23 @@ def coletar_estacao_meteorologica():
             log.warning("Planilha da Estação Meteorológica está vazia.")
             return pd.DataFrame()
         df = pd.DataFrame(registros)
+ 
+        _estacao_completa = df.copy()            # minuto a minuto, para gráficos e 3D
+ 
+        df = _reduzir_para_horario(df)           # 1 linha por hora para a tabela/Sheets
         df.insert(0, "Estacao", "Estação Meteorológica")
-        log.info(f"OK: {len(df)} registros da Estação Meteorológica")
+        log.info(f"OK: {len(registros)} leituras da Estação -> {len(df)} linhas horárias")
         _marcar_diagnostico("Estação Meteorológica", True, len(df))
         return df
     except Exception as e:
         log.error(f"Erro ao ler a planilha da Estação Meteorológica: {e}")
         _marcar_diagnostico("Estação Meteorológica", False, 0, str(e))
         return pd.DataFrame()
-
+ 
 # ==========================================================
 # DADOS DA COMUNIDADE (formulário público em /adicionar)
 # ==========================================================
-
+ 
 def coletar_dados_comunidade():
     """
     Relê a aba "Dados da Comunidade" (mesma planilha de destino) e devolve
@@ -352,9 +410,9 @@ def coletar_dados_comunidade():
     """
     if not GSHEETS_ATIVO:
         return pd.DataFrame()
-
+ 
     import gspread
-
+ 
     try:
         gc = _obter_cliente_gspread()
         sh = _abrir_planilha(gc)
@@ -373,12 +431,12 @@ def coletar_dados_comunidade():
         log.error(f"Erro ao ler dados da comunidade: {e}")
         _marcar_diagnostico("Dados da Comunidade", False, 0, str(e))
         return pd.DataFrame()
-
+ 
 def _salvar_dados_comunidade(linhas):
     """
     Grava várias linhas de uma vez (append_rows) na aba "Dados da
     Comunidade", criando a aba com o cabeçalho se ainda não existir.
-
+ 
     Como qualquer CSV é aceito, o cabeçalho da aba é ajustado
     dinamicamente: colunas novas são acrescentadas ao final do cabeçalho
     existente, sem apagar nem reordenar o que já estava lá.
@@ -387,18 +445,18 @@ def _salvar_dados_comunidade(linhas):
         return
     if not GSHEETS_ATIVO:
         raise RuntimeError("Google Sheets desativado; não é possível salvar envios do formulário.")
-
+ 
     import gspread
-
+ 
     gc = _obter_cliente_gspread()
     sh = _abrir_planilha(gc)
-
+ 
     colunas_envio = []
     for linha in linhas:
         for col in linha.keys():
             if col not in colunas_envio:
                 colunas_envio.append(col)
-
+ 
     try:
         ws = sh.worksheet(DADOS_COMUNIDADE_ABA)
         cabecalho_atual = ws.row_values(1)
@@ -407,16 +465,16 @@ def _salvar_dados_comunidade(linhas):
             title=DADOS_COMUNIDADE_ABA, rows=1000, cols=max(len(colunas_envio), 1)
         )
         cabecalho_atual = []
-
+ 
     colunas_novas   = [c for c in colunas_envio if c not in cabecalho_atual]
     cabecalho_final = cabecalho_atual + colunas_novas
-
+ 
     if cabecalho_final != cabecalho_atual:
         ws.update([cabecalho_final])
-
+ 
     valores = [[str(linha.get(campo, "")) for campo in cabecalho_final] for linha in linhas]
     ws.append_rows(valores)
-
+ 
 # ── Reconhecimento das colunas do CSV enviado pela pessoa ──────────
 ALIASES_COMUNIDADE = {
     "nome": "Nome/Apelido", "apelido": "Nome/Apelido", "nome/apelido": "Nome/Apelido",
@@ -437,14 +495,14 @@ ALIASES_COMUNIDADE = {
     "observacao": "Observação", "observacoes": "Observação", "obs": "Observação",
     "comentario": "Observação", "comentarios": "Observação",
 }
-
+ 
 def _normalizar_texto(txt):
     """Minúsculas, sem acento e sem espaços nas pontas."""
     import unicodedata
     txt = str(txt).strip().lower()
     txt = "".join(c for c in unicodedata.normalize("NFKD", txt) if not unicodedata.combining(c))
     return txt
-
+ 
 def _mapear_colunas_csv(df):
     renomear = {}
     for col in df.columns:
@@ -452,11 +510,11 @@ def _mapear_colunas_csv(df):
         if chave in ALIASES_COMUNIDADE:
             renomear[col] = ALIASES_COMUNIDADE[chave]
     return df.rename(columns=renomear)
-
+ 
 def _processar_csv_comunidade(conteudo_bytes, nome_padrao):
     """
     Lê o CSV enviado e devolve (linhas_validas, total, ignoradas).
-
+ 
     ACEITA QUALQUER CSV, com qualquer conjunto de colunas. Colunas com
     nomes reconhecidos (ALIASES_COMUNIDADE) são renomeadas para o padrão;
     as demais são mantidas como vieram. Separador por vírgula ou ponto e
@@ -471,33 +529,33 @@ def _processar_csv_comunidade(conteudo_bytes, nome_padrao):
             continue
     if texto is None:
         raise ValueError("Não foi possível ler a codificação do arquivo.")
-
+ 
     df = pd.read_csv(io.StringIO(texto), sep=None, engine="python")
     df = _mapear_colunas_csv(df)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.fillna("").astype(str)
     for col in df.columns:
         df[col] = df[col].str.strip()
-
+ 
     agora = datetime.now()
     total = len(df)
-
+ 
     if "Nome/Apelido" not in df.columns:
         df["Nome/Apelido"] = ""
     df.loc[df["Nome/Apelido"] == "", "Nome/Apelido"] = nome_padrao or "Anônimo"
-
+ 
     if "Data" not in df.columns:
         df["Data"] = ""
     df.loc[df["Data"] == "", "Data"] = agora.strftime("%Y-%m-%d")
-
+ 
     if "Hora" not in df.columns:
         df["Hora"] = ""
     df.loc[df["Hora"] == "", "Hora"] = agora.strftime("%H:%M")
-
+ 
     ordem_conhecida = [c for c in CAMPOS_COMUNIDADE if c in df.columns]
     extras          = [c for c in df.columns if c not in CAMPOS_COMUNIDADE]
     df = df[ordem_conhecida + extras]
-
+ 
     linhas_validas = []
     for _, row in df.iterrows():
         linha = row.to_dict()
@@ -505,10 +563,10 @@ def _processar_csv_comunidade(conteudo_bytes, nome_padrao):
         if outros_valores and not any(v.strip() for v in outros_valores):
             continue
         linhas_validas.append(linha)
-
+ 
     ignoradas = total - len(linhas_validas)
     return linhas_validas, total, ignoradas
-
+ 
 # ==========================================================
 # INMET — API de tempo real (fonte principal) + ZIP anual (reserva)
 # ==========================================================
@@ -519,9 +577,9 @@ def _processar_csv_comunidade(conteudo_bytes, nome_padrao):
 #
 # Ambas já trazem a coluna de radiação solar quando disponível; como o
 # código só repassa as colunas devolvidas, ela aparece sem alterações.
-
+ 
 URL_INMET_API_BASE = "https://apitempo.inmet.gov.br/estacao/{inicio}/{fim}/{codigo}"
-
+ 
 def coletar_inmet_api():
     """
     Busca o dado hora a hora mais recente de cada estação via API de
@@ -531,7 +589,7 @@ def coletar_inmet_api():
     hoje    = date.today()
     inicio  = (hoje - timedelta(days=2)).isoformat()
     fim     = hoje.isoformat()
-
+ 
     blocos = []
     for codigo, cidade in ESTACOES.items():
         url = URL_INMET_API_BASE.format(inicio=inicio, fim=fim, codigo=codigo)
@@ -555,16 +613,16 @@ def coletar_inmet_api():
         except Exception as e:
             log.warning(f"Erro ao consultar API de tempo real do INMET para {cidade} ({codigo}): {e}")
             _marcar_diagnostico(fonte_diag, False, 0, str(e))
-
+ 
     if not blocos:
         return pd.DataFrame()
     return pd.concat(blocos, ignore_index=True)
-
+ 
 # ── Reserva: ZIP histórico anual, com checagem por hash de conteúdo ──
-
+ 
 _inmet_zip_hash_cache = {}
 _inmet_zip_url_ativa  = None
-
+ 
 def _resolver_url_inmet_zip(sessao):
     global _inmet_zip_url_ativa
     candidatos = [ANO_ATUAL, ANO_ATUAL - 1]
@@ -579,7 +637,7 @@ def _resolver_url_inmet_zip(sessao):
         except Exception:
             log.warning(f"ZIP do INMET para {ano} indisponível, tentando outro ano...")
     raise RuntimeError("Nenhum ZIP do INMET disponível (ano atual nem anterior).")
-
+ 
 def coletar_inmet_zip_reserva(forcar=False):
     """
     Caminho de reserva: baixa o ZIP histórico anual e só reprocessa se o
@@ -587,13 +645,13 @@ def coletar_inmet_zip_reserva(forcar=False):
     real falha para todas as estações.
     """
     import hashlib
-
+ 
     try:
         url = _resolver_url_inmet_zip(sessao_http)
     except Exception as e:
         log.error(f"Erro ao resolver URL do ZIP do INMET: {e}")
         return pd.DataFrame()
-
+ 
     log.info("Baixando ZIP do INMET (reserva) para checagem...")
     try:
         resposta = sessao_http.get(url, timeout=180)
@@ -602,14 +660,14 @@ def coletar_inmet_zip_reserva(forcar=False):
     except Exception as e:
         log.error(f"Erro ao baixar ZIP do INMET (reserva): {e}")
         return pd.DataFrame()
-
+ 
     hash_atual    = hashlib.sha256(conteudo).hexdigest()
     hash_anterior = _inmet_zip_hash_cache.get(url)
-
+ 
     if not forcar and hash_anterior == hash_atual:
         log.info("INMET (reserva): conteúdo do ZIP idêntico ao da última coleta.")
         return pd.DataFrame()
-
+ 
     try:
         zip_file = zipfile.ZipFile(io.BytesIO(conteudo))
         arquivos = zip_file.namelist()
@@ -628,16 +686,16 @@ def coletar_inmet_zip_reserva(forcar=False):
                         log.info(f"OK: INMET (reserva/ZIP) - {cidade}")
                     except Exception as e:
                         log.error(f"Erro ao processar estação {cidade} (reserva/ZIP): {e}")
-
+ 
         if not dados:
             return pd.DataFrame()
-
+ 
         _inmet_zip_hash_cache[url] = hash_atual
         return pd.concat(dados, ignore_index=True)
     except Exception as e:
         log.error(f"Erro ao processar ZIP do INMET (reserva): {e}")
         return pd.DataFrame()
-
+ 
 def coletar_inmet(forcar=False):
     """
     Ponto de entrada único usado por montar_tabela(). Tenta a API de
@@ -648,7 +706,7 @@ def coletar_inmet(forcar=False):
     if not df_api.empty:
         _marcar_diagnostico("INMET (fonte usada)", True, len(df_api), "API de tempo real")
         return df_api, True
-
+ 
     log.warning("API de tempo real do INMET não retornou dados para nenhuma estação; "
                 "usando ZIP histórico como reserva.")
     df_zip = coletar_inmet_zip_reserva(forcar=forcar)
@@ -657,30 +715,30 @@ def coletar_inmet(forcar=False):
     else:
         _marcar_diagnostico("INMET (fonte usada)", False, 0, "API e ZIP falharam/sem novidade")
     return df_zip, (not df_zip.empty)
-
+ 
 def encontrar_coluna(colunas, *chaves):
     for col in colunas:
         nome = str(col).upper()
         if all(chave.upper() in nome for chave in chaves):
             return col
     return None
-
+ 
 # ==========================================================
 # ESTADO COMPARTILHADO
 # ==========================================================
-
+ 
 tabela             = pd.DataFrame()
 tabela_lock        = threading.Lock()
 ultima_atualizacao = None
 _ultimo_bloco_inmet = pd.DataFrame()
-
+ 
 # ==========================================================
 # DIAGNÓSTICO — registra o resultado de cada coleta, fonte a fonte
 # ==========================================================
-
+ 
 _diagnostico_lock = threading.Lock()
 _diagnostico = {}  # fonte -> {"ok": bool, "registros": int, "detalhe": str, "hora": datetime}
-
+ 
 def _marcar_diagnostico(fonte, ok, registros=0, detalhe=""):
     with _diagnostico_lock:
         _diagnostico[fonte] = {
@@ -689,36 +747,36 @@ def _marcar_diagnostico(fonte, ok, registros=0, detalhe=""):
             "detalhe": detalhe,
             "hora": datetime.now(),
         }
-
+ 
 # ==========================================================
 # MONTAR TABELA UNIFICADA
 # ==========================================================
-
+ 
 def montar_tabela(forcar_inmet=False):
     """
     forcar_inmet: repassado ao caminho de reserva (ZIP anual); ignora o
     cache de hash. Sem efeito quando a API de tempo real responde.
     """
     global _ultimo_bloco_inmet
-
+ 
     def _unir(lista):
         lista = [d for d in lista if not d.empty]
         if not lista:
             return pd.DataFrame()
         t = pd.concat(lista, ignore_index=True)
         return t[["Estacao"] + [c for c in t.columns if c != "Estacao"]]
-
+ 
     # 1) Fontes rápidas primeiro (planilhas e INMET)
     df_estacao    = coletar_estacao_meteorologica()
     df_comunidade = coletar_dados_comunidade()
-
+ 
     df_inmet_novo, inmet_mudou = coletar_inmet(forcar=forcar_inmet)
     if inmet_mudou and not df_inmet_novo.empty:
         _ultimo_bloco_inmet = df_inmet_novo
     else:
         log.info("INMET: usando o último bloco de dados válido dessa fonte (nenhuma novidade neste ciclo).")
     df_inmet = _ultimo_bloco_inmet
-
+ 
     # Publica já uma tabela parcial, se o site ainda estiver vazio: assim a
     # página abre sem esperar o Open-Meteo (que pode demorar por causa do 429).
     global tabela, ultima_atualizacao
@@ -728,22 +786,22 @@ def montar_tabela(forcar_inmet=False):
             tabela = parcial
             ultima_atualizacao = datetime.now()
             log.info(f"Tabela parcial publicada ({len(parcial)} registros), sem esperar o Open-Meteo.")
-
+ 
     # 2) Open-Meteo por último (lento quando há 429)
     df_hora = coletar_om_horario()
     df_prev = coletar_om_diario()
-
+ 
     return _unir([df_hora, df_prev, df_estacao, df_comunidade, df_inmet])
-
+ 
 # ==========================================================
 # GOOGLE SHEETS — abas de dados
 # ==========================================================
-
+ 
 _hash_abas_enviadas = {}
-
+ 
 def _hash_dataframe(df):
     return pd.util.hash_pandas_object(df.fillna("—").astype(str)).sum()
-
+ 
 def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False):
     """
     Reescreve uma aba inteira. Encolhe a grade antes de limpar (libera células
@@ -752,16 +810,16 @@ def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False
     """
     import gspread
     from gspread.utils import rowcol_to_a1
-
+ 
     novo_hash = _hash_dataframe(dados)
     if not pular_dedup and _hash_abas_enviadas.get(nome_aba) == novo_hash:
         log.info(f"Aba '{nome_aba}' sem mudanças; pulando escrita no Sheets.")
         return
-
+ 
     dados_str = dados.fillna("—").astype(str)
     linhas    = [dados_str.columns.tolist()] + dados_str.values.tolist()
     n_lin, n_col = len(linhas), len(dados_str.columns)
-
+ 
     for tentativa in range(1, tentativas + 1):
         try:
             try:
@@ -771,7 +829,7 @@ def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False
                 ws.clear()
             except gspread.exceptions.WorksheetNotFound:
                 ws = sh.add_worksheet(title=nome_aba, rows=n_lin + 10, cols=n_col)
-
+ 
             for i in range(0, n_lin, SHEETS_TAMANHO_BLOCO):
                 ws.update(values=linhas[i:i + SHEETS_TAMANHO_BLOCO],
                           range_name=rowcol_to_a1(i + 1, 1))
@@ -787,19 +845,19 @@ def _escrever_aba_com_retry(sh, nome_aba, dados, tentativas=3, pular_dedup=False
             log.exception(f"Erro inesperado ao escrever aba '{nome_aba}'")
             return
     log.error(f"Falha ao escrever aba '{nome_aba}' após {tentativas} tentativas.")
-
+ 
 # ==========================================================
 # HISTÓRICOS (alimentam os gráficos de comparação e do INMET)
 # ==========================================================
 # INMET: baixa o ZIP anual no máximo 1x a cada 24 h, em thread própria,
 # e guarda só os resumos diários por estação (pequeno).
 # Open-Meteo: 1 chamada leve a cada 6 h, resumida por dia.
-
+ 
 _historico_inmet    = {}     # cidade -> DataFrame[data, tmed, umid, vento, chuva, rad]
 _historico_hora     = None
 _historico_rodando  = False
 _historico_lock     = threading.Lock()
-
+ 
 def _classificar_coluna_inmet(nome):
     """Diz qual variável do ZIP histórico do INMET é uma coluna (ou None)."""
     u = str(nome).upper()
@@ -816,7 +874,7 @@ def _classificar_coluna_inmet(nome):
     if u.startswith("RADIA"):
         return "rad"
     return None
-
+ 
 def _atualizar_historico_inmet():
     """
     Guarda, por estação e por dia: temperatura média, umidade média, vento
@@ -892,11 +950,11 @@ def _atualizar_historico_inmet():
     finally:
         with _historico_lock:
             _historico_rodando = False
-
+ 
 _om_historico      = pd.DataFrame()
 _om_hist_hora      = None
 _om_hist_lock      = threading.Lock()
-
+ 
 def _atualizar_om_historico():
     global _om_historico, _om_hist_hora
     with _om_hist_lock:
@@ -939,13 +997,13 @@ def _atualizar_om_historico():
         _marcar_diagnostico("Open-Meteo histórico (30 dias)", False, 0, str(e))
         with _om_hist_lock:                                # tenta de novo em ~1 h
             _om_hist_hora = datetime.now() - timedelta(hours=5)
-
+ 
 # ==========================================================
 # ESTAÇÃO METEOROLÓGICA — resumos diário e horário (p/ gráficos)
 # ==========================================================
-
+ 
 _cache_estacao = {"stamp": None, "res": (None, {})}
-
+ 
 def _preparar_estacao(e):
     """
     Limpa as leituras da Estação Meteorológica (1 por minuto). Reconhece
@@ -953,13 +1011,13 @@ def _preparar_estacao(e):
     colunas data, h (hora) e as variáveis encontradas, ou None.
     """
     norm = {c: _normalizar_texto(c) for c in e.columns}
-
+ 
     def achar(tem, sem=()):
         for c, n in norm.items():
             if any(t in n for t in tem) and not any(x in n for x in sem):
                 return c
         return None
-
+ 
     c_data  = achar(("data",))
     c_hora  = achar(("hora",))
     c_temp  = achar(("temperatura",), ("bmp", "max", "min", "orvalho"))
@@ -969,10 +1027,10 @@ def _preparar_estacao(e):
     c_rad   = achar(("radia",))
     if c_data is None:
         return None
-
+ 
     def num(c):
         return pd.to_numeric(e[c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-
+ 
     g = pd.DataFrame({"data": pd.to_datetime(e[c_data].astype(str), dayfirst=True,
                                               errors="coerce").dt.normalize()})
     g["h"] = e[c_hora].astype(str).str.extract(r"(\d{1,2})")[0] if c_hora else "00"
@@ -991,7 +1049,7 @@ def _preparar_estacao(e):
     if g.empty:
         return None
     return g, bool(c_hora)
-
+ 
 def _estacao_resumos(df):
     """
     Devolve (diario, horario_hoje):
@@ -999,18 +1057,19 @@ def _estacao_resumos(df):
               — só dias com leituras em pelo menos 18 horas diferentes.
       horario_hoje: {variável: {"HH:00": valor}} (chuva = soma da hora;
               radiação em W/m², igual ao Open-Meteo).
+    Usa a base minuto a minuto (_estacao_completa), não a tabela reduzida.
     Guardado em cache até a tabela mudar.
     """
-    stamp = (ultima_atualizacao, len(df))
+    stamp = (ultima_atualizacao, len(df), len(_estacao_completa))
     if _cache_estacao["stamp"] == stamp:
         return _cache_estacao["res"]
     diario, horario = None, {}
     try:
-        e = df[df["Estacao"] == "Estação Meteorológica"].dropna(axis=1, how="all")
+        e = _estacao_completa.dropna(axis=1, how="all")
         prep = _preparar_estacao(e) if not e.empty else None
         if prep is not None:
             g, tem_hora = prep
-
+ 
             # ── diário ──
             grp = g.groupby("data")
             horas = grp["h"].nunique()
@@ -1023,7 +1082,7 @@ def _estacao_resumos(df):
             if "rad" in g:
                 res["rad"] = grp["rad"].mean() * 0.0864        # W/m² médio -> MJ/m² no dia
             diario = res[horas >= (18 if tem_hora else 1)].dropna(how="all")
-
+ 
             # ── hoje, hora a hora ──
             gh = g[g["data"] == pd.Timestamp(date.today())]
             if tem_hora and not gh.empty:
@@ -1038,7 +1097,7 @@ def _estacao_resumos(df):
         log.error(f"Erro ao resumir a Estação Meteorológica: {ex}")
     _cache_estacao["stamp"], _cache_estacao["res"] = stamp, (diario, horario)
     return diario, horario
-
+ 
 # ==========================================================
 # GRÁFICOS — UMA lista, usada pelo site, pelo PDF e pelo Google Sheets
 # ==========================================================
@@ -1049,23 +1108,23 @@ def _estacao_resumos(df):
 # dado. A lista é SEMPRE a mesma (mesmos gráficos, mesmas séries, mesmo
 # número de linhas); só os valores mudam. Isso mantém fixo o layout da aba
 # "Gráficos" no Sheets, onde cada gráfico nativo é criado uma única vez.
-
+ 
 SEC_OM    = "Open-Meteo — hoje e próximos dias"
 SEC_HOJE  = "Hoje, hora a hora — Open-Meteo × Estação Meteorológica"
 SEC_COMP  = "Últimos 30 dias — INMET × Open-Meteo × Estação Meteorológica"
 SEC_INMET = "INMET — histórico das estações"
 ORDEM_SECOES = [SEC_OM, SEC_HOJE, SEC_COMP, SEC_INMET]
-
+ 
 INMET_COMPARACAO = "Cachoeira do Sul"     # estação do INMET usada na comparação de 30 dias
-
+ 
 _HORAS = [f"{h:02d}:00" for h in range(24)]
-
+ 
 _CORES_INMET = {
     "Cachoeira do Sul":         "#2E7D32",
     "Santa Maria Automática":   "#F9A825",
     "Santa Maria Convencional": "#AD1457",
 }
-
+ 
 # Gráficos hora a hora de hoje (Open-Meteo) além da temperatura:
 # (id, coluna, título, cor, unidade eixo, unidade tooltip, eixo em 0, casas, título Y)
 GRAFICOS_HORARIOS = [
@@ -1078,7 +1137,7 @@ GRAFICOS_HORARIOS = [
     ("om_chuva", "Precip. (mm)",          "Chuva hoje (hora a hora) — Open-Meteo",
      "#3949AB", "", " mm", True, 1, "Chuva (mm)"),
 ]
-
+ 
 # Comparação de HOJE, hora a hora: Open-Meteo × Estação Meteorológica
 # (coluna Open-Meteo, chave da estação, título, un, tip, zero, casas, título Y)
 COMPARACAO_HOJE = [
@@ -1088,7 +1147,7 @@ COMPARACAO_HOJE = [
     ("Precip. (mm)",          "chuva", "Chuva hoje (por hora): Open-Meteo × Estação","",  " mm",   True,  1, "Chuva (mm)"),
     ("Radiação Solar (W/m²)", "rad",   "Radiação hoje: Open-Meteo × Estação",        "",  " W/m²", True,  0, "Radiação (W/m²)"),
 ]
-
+ 
 # Comparação dos últimos 30 dias (resumo diário)
 # (chave, título, unidade no eixo, unidade no tooltip, eixo em 0, casas, título Y)
 VARIAVEIS_COMPARACAO = [
@@ -1098,28 +1157,28 @@ VARIAVEIS_COMPARACAO = [
     ("chuva", "Chuva total do dia",             "",  " mm",    True,  1, "Chuva (mm)"),
     ("rad",   "Radiação solar total do dia",    "",  " MJ/m²", True,  0, "Radiação (MJ/m²)"),
 ]
-
+ 
 def _dados_graficos(df):
     """Extrai da tabela unificada os dois blocos numéricos do Open-Meteo (hoje e semana)."""
     linhas_hora, linhas_dia = [], []
     if df.empty or "Estacao" not in df.columns:
         return linhas_hora, linhas_dia
-
+ 
     df_h = df[df["Estacao"] == "Open-Meteo – Hoje (horário)"].copy()
     if not df_h.empty and "Temperatura (°C)" in df_h.columns:
         df_h["_temp"] = pd.to_numeric(df_h["Temperatura (°C)"], errors="coerce")
         df_h = df_h.dropna(subset=["_temp"]).sort_values("Hora")
         linhas_hora = [[str(r["Hora"])[:5], float(r["_temp"])] for _, r in df_h.iterrows()]
-
+ 
     df_d = df[df["Estacao"] == "Open-Meteo – Previsão (diária)"].copy()
     if not df_d.empty and "Temp. Máx (°C)" in df_d.columns:
         df_d["_max"] = pd.to_numeric(df_d["Temp. Máx (°C)"], errors="coerce")
         df_d["_min"] = pd.to_numeric(df_d["Temp. Mín (°C)"], errors="coerce")
         df_d = df_d.dropna(subset=["_max", "_min"]).sort_values("Data").head(7)
         linhas_dia = [[str(r["Data"]), float(r["_max"]), float(r["_min"])] for _, r in df_d.iterrows()]
-
+ 
     return linhas_hora, linhas_dia
-
+ 
 def _serie_horaria(df, coluna):
     """Lista [[hora, valor], ...] de uma coluna do Open-Meteo horário."""
     if df.empty or "Estacao" not in df.columns:
@@ -1130,28 +1189,28 @@ def _serie_horaria(df, coluna):
     v = pd.to_numeric(df_h[coluna], errors="coerce")
     d = df_h.assign(_v=v).dropna(subset=["_v"]).sort_values("Hora")
     return [[str(h)[:5], float(x)] for h, x in zip(d["Hora"], d["_v"])]
-
+ 
 def _g(id_, secao, titulo, rot, series, un="", tip="", zero=False, casas=0,
        ty="", tx="Hora", sufixo=""):
     return {"id": id_, "secao": secao, "titulo": titulo, "sufixo": sufixo,
             "rotulos": rot, "series": series, "un": un, "tip": tip,
             "zero": zero, "casas": casas, "ty": ty, "tx": tx}
-
+ 
 def _montar_graficos(df):
     """Monta TODOS os gráficos. Devolve {"graficos": [...], "notas": {seção: [html]}}."""
     import numpy as np
-
+ 
     graficos, notas = [], {s: [] for s in ORDEM_SECOES}
-
+ 
     def v24(mapa):
         return [mapa.get(h) for h in _HORAS]
-
+ 
     # ── 1. Open-Meteo: hoje e semana ───────────────────────────────
     horas, dias = _dados_graficos(df)
     graficos.append(_g(
         "om_temp_hoje", SEC_OM, "Temperatura hoje (hora a hora) — Open-Meteo", _HORAS,
         [("Temperatura (°C)", "#1565C0", v24(dict(horas)))], "°", "°C", False, 0, "Temperatura (°C)"))
-
+ 
     falta = 7 - len(dias)
     graficos.append(_g(
         "om_semana", SEC_OM, "Máxima e mínima da semana — Open-Meteo",
@@ -1159,7 +1218,7 @@ def _montar_graficos(df):
         [("Máx (°C)", "#E53935", [r[1] for r in dias] + [None] * falta),
          ("Mín (°C)", "#1E88E5", [r[2] for r in dias] + [None] * falta)],
         "°", "°C", False, 0, "Temperatura (°C)", tx="Data"))
-
+ 
     for id_, coluna, titulo, cor, un, tip, zero, casas, ty in GRAFICOS_HORARIOS:
         mapa = dict(_serie_horaria(df, coluna))
         sufixo = ""
@@ -1167,7 +1226,7 @@ def _montar_graficos(df):
             sufixo = f" — total do dia: {sum(mapa.values()):.1f} mm".replace(".", ",")
         graficos.append(_g(id_, SEC_OM, titulo, _HORAS, [(coluna, cor, v24(mapa))],
                            un, tip, zero, casas, ty, sufixo=sufixo))
-
+ 
     # ── 2. Hoje, hora a hora: Open-Meteo × Estação ────────────────
     est_dia, est_hora = _estacao_resumos(df)
     for col_om, chave, titulo, un, tip, zero, casas, ty in COMPARACAO_HOJE:
@@ -1183,7 +1242,7 @@ def _montar_graficos(df):
     else:
         notas[SEC_HOJE].append("Estação: média por hora das leituras (chuva = soma da hora); "
                                "Open-Meteo: valor horário do modelo")
-
+ 
     # ── 3. Últimos 30 dias: INMET × Open-Meteo × Estação ──────────
     dias30 = pd.date_range(end=pd.Timestamp(date.today()), periods=30)
     rot30  = [d.strftime("%d/%m") for d in dias30]
@@ -1219,7 +1278,7 @@ def _montar_graficos(df):
         notas[SEC_COMP].append(f"<strong>Estação Meteorológica</strong>: {n_dias} de 30 dias com dados "
                                f"(só dias com leituras em 18 h ou mais)")
     notas[SEC_COMP].append("INMET vem do histórico oficial e costuma ter 1–3 semanas de atraso")
-
+ 
     # ── 4. INMET: 60 dias com tendência + média mensal ────────────
     with _historico_lock:
         dados = {c: d.copy() for c, d in _historico_inmet.items()}
@@ -1246,7 +1305,7 @@ def _montar_graficos(df):
                        sufixo=", tracejado = tendência"))
     if resumo:
         notas[SEC_INMET].append(" &nbsp;|&nbsp; ".join(resumo).replace(".", ","))
-
+ 
     ano = int(ultimo.year)
     meses = [pd.Period(f"{ano}-{k:02d}", "M") for k in range(1, 13)]
     series_m = []
@@ -1261,12 +1320,12 @@ def _montar_graficos(df):
     graficos.append(_g("inmet_mensal", SEC_INMET, "Temperatura média mensal — INMET",
                        [f"{k:02d}/{str(ano)[2:]}" for k in range(1, 13)], series_m,
                        "°", "°C", False, 0, "Temperatura (°C)", tx="Mês"))
-
+ 
     return {"graficos": graficos, "notas": notas}
-
+ 
 _cache_graficos = {"stamp": None, "dados": None}
 _cache_graficos_lock = threading.Lock()
-
+ 
 def obter_graficos(df):
     """Monta a lista de gráficos 1x por ciclo/atualização de histórico e reaproveita."""
     stamp = (ultima_atualizacao, len(df), _historico_hora, _om_hist_hora)
@@ -1277,19 +1336,19 @@ def obter_graficos(df):
     with _cache_graficos_lock:
         _cache_graficos["stamp"], _cache_graficos["dados"] = stamp, dados
     return dados
-
+ 
 # ==========================================================
 # GRÁFICOS — preparo comum (site e PDF)
 # ==========================================================
-
+ 
 _DIM = (860, 320, 48, 20, 42, 40)       # W, H, L, R, T, B
-
+ 
 def _titulo_completo(g):
     return g["titulo"] + g.get("sufixo", "")
-
+ 
 def _eh_tracejada(s):
     return len(s) > 3 and bool(s[3])
-
+ 
 def _preparar_grafico(g):
     """
     Descarta séries sem nenhum dado e corta rótulos vazios nas pontas.
@@ -1305,19 +1364,19 @@ def _preparar_grafico(g):
     rot = g["rotulos"][a:b]
     series = [tuple(s[:2]) + (s[2][a:b],) + tuple(s[3:]) for s in series]
     return rot, series
-
+ 
 def _eixo_y(series, zero):
     todos = [v for it in series for v in it[2] if v is not None]
     ymin = 0 if zero else math.floor(min(todos)) - 1
     ymax = math.ceil(max(todos)) + 1
     return ymin, ymax
-
+ 
 # ── Estilos para diferenciar séries em gráficos de comparação ──────
 # (tracejado SVG/PDF, formato do marcador)
 _ESTILOS = [("", "circle"), ("9 3 2 3", "square"), ("2 4", "triangle")]
 # (tipo de linha, formato do ponto) no Google Sheets
 _SHEETS_ESTILOS = [("SOLID", "CIRCLE"), ("LONG_DASHED_DOTTED", "SQUARE"), ("DOTTED", "TRIANGLE")]
-
+ 
 def _estilo_serie(series, it):
     """Estilo da série; só diferencia quando há 2+ séries (comparação)."""
     base = [s for s in series if not _eh_tracejada(s)]
@@ -1325,7 +1384,7 @@ def _estilo_serie(series, it):
         return _ESTILOS[0]
     k = next(i for i, s in enumerate(base) if s is it)
     return _ESTILOS[k % len(_ESTILOS)]
-
+ 
 def _marcador_svg(forma, cx, cy, cor, tip):
     t = f"<title>{tip}</title>"
     if forma == "square":
@@ -1334,7 +1393,7 @@ def _marcador_svg(forma, cx, cy, cor, tip):
         return (f'<polygon points="{cx:.1f},{cy-4:.1f} {cx-4:.1f},{cy+3:.1f} {cx+4:.1f},{cy+3:.1f}" '
                 f'fill="{cor}">{t}</polygon>')
     return f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3" fill="{cor}">{t}</circle>'
-
+ 
 def _segmentos(vals):
     segs, atual = [], []
     for i, v in enumerate(vals):
@@ -1347,7 +1406,7 @@ def _segmentos(vals):
     if atual:
         segs.append(atual)
     return segs
-
+ 
 def _svg_linha(g):
     """Gráfico de linhas em SVG puro, a partir de um dict da lista de gráficos."""
     prep = _preparar_grafico(g)
@@ -1358,13 +1417,13 @@ def _svg_linha(g):
     ymin, ymax = _eixo_y(series, g["zero"])
     pw, ph, n = W - L - R, H - T - B, len(rotulos)
     un, tip, casas = g["un"], g["tip"], g["casas"]
-
+ 
     def x(i):
         return L + (pw / 2 if n == 1 else i * pw / (n - 1))
-
+ 
     def y(v):
         return T + ph - (v - ymin) / (ymax - ymin) * ph
-
+ 
     s = [f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" font-family="Arial" font-size="11">',
          f'<text x="{W/2}" y="22" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">'
          f'{_titulo_completo(g)}</text>']
@@ -1377,7 +1436,7 @@ def _svg_linha(g):
     for i, r in enumerate(rotulos):
         if i % passo == 0:
             s.append(f'<text x="{x(i):.1f}" y="{H-B+16}" text-anchor="middle" fill="#666">{r}</text>')
-
+ 
     for it in series:
         cor, vals, trac = it[1], it[2], _eh_tracejada(it)
         dash, forma = _estilo_serie(series, it)
@@ -1394,7 +1453,7 @@ def _svg_linha(g):
                 if v is not None:
                     s.append(_marcador_svg(forma, x(i), y(v), cor,
                                            f'{rotulos[i]}: {v:.{max(casas, 1)}f}{tip}'))
-
+ 
     lx = L
     for it in series:
         if it[0]:
@@ -1406,21 +1465,21 @@ def _svg_linha(g):
             lx += 50 + 7 * len(it[0])
     s.append("</svg>")
     return "".join(s)
-
+ 
 # ==========================================================
 # GRÁFICOS NO GOOGLE SHEETS (aba "Gráficos", gráficos nativos)
 # ==========================================================
 # Layout: gráficos à ESQUERDA (grade de 2 por linha); dados à DIREITA, a
 # partir da coluna AE. A coluna AD, linha 1, guarda a marca do layout: se
 # for diferente (aba antiga), a aba é recriada uma única vez.
-
+ 
 ABA_GRAFICOS        = "Gráficos"
 _GRAF_MARCA         = "layout-v4"
 _GRAF_MARCA_COL     = 29            # coluna AD (índice 0-based)
 _GRAF_COL_INI       = 30            # coluna AE: primeiro bloco de dados
 _GRAF_PASSO_LINHAS  = 18            # altura de cada gráfico, em linhas
 _GRAF_PASSO_COLUNAS = 8             # segundo gráfico da linha começa na coluna 8
-
+ 
 def _layout_sheets(graficos):
     """[(gráfico, coluna_dos_rótulos, séries_sem_tracejado)], coluna_final."""
     col, saida = _GRAF_COL_INI, []
@@ -1429,15 +1488,15 @@ def _layout_sheets(graficos):
         saida.append((g, col, sers))
         col += len(sers) + 2                 # rótulo + séries + 1 coluna de respiro
     return saida, col
-
+ 
 def _faixa_grafico(sheet_id, col_ini, col_fim, linhas):
     return {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": linhas,
             "startColumnIndex": col_ini, "endColumnIndex": col_fim}
-
+ 
 def _hex_rgb(h):
     h = h.lstrip("#")
     return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
-
+ 
 def _spec_grafico_linha(sheet_id, g, col, sers, posicao):
     """Requisição addChart de um gráfico de linha nativo."""
     linhas = len(g["rotulos"]) + 1
@@ -1480,7 +1539,7 @@ def _spec_grafico_linha(sheet_id, g, col, sers, posicao):
             }
         }
     }
-
+ 
 def _atualizar_aba_graficos(sh, dados):
     """
     Reescreve os dados da aba "Gráficos" (uma única chamada) e cria os
@@ -1489,18 +1548,18 @@ def _atualizar_aba_graficos(sh, dados):
     """
     import gspread
     from gspread.utils import rowcol_to_a1
-
+ 
     graficos = dados["graficos"]
     layout, col_final = _layout_sheets(graficos)
     if not any(any(v is not None for s in sers for v in s[2]) for _, _, sers in layout):
         log.info("Sem dados para os gráficos neste ciclo; aba de gráficos não foi atualizada.")
         return
-
+ 
     try:
         largura  = col_final - _GRAF_MARCA_COL            # inclui a coluna da marca
         altura   = 1 + max(len(g["rotulos"]) for g in graficos)
         linhas_ws = max(200, (len(graficos) // 2 + 1) * _GRAF_PASSO_LINHAS + 5)
-
+ 
         try:
             ws = sh.worksheet(ABA_GRAFICOS)
             if ws.cell(1, _GRAF_MARCA_COL + 1).value != _GRAF_MARCA:
@@ -1511,7 +1570,7 @@ def _atualizar_aba_graficos(sh, dados):
             ws = sh.add_worksheet(title=ABA_GRAFICOS, rows=linhas_ws, cols=col_final + 2)
         if ws.col_count < col_final + 2 or ws.row_count < linhas_ws:
             ws.resize(rows=max(ws.row_count, linhas_ws), cols=max(ws.col_count, col_final + 2))
-
+ 
         # Matriz única com todos os blocos (marca + dados)
         matriz = [[""] * largura for _ in range(altura)]
         matriz[0][0] = _GRAF_MARCA
@@ -1525,12 +1584,12 @@ def _atualizar_aba_graficos(sh, dados):
                 for j, s in enumerate(sers):
                     v = s[2][i]
                     matriz[i + 1][c + 1 + j] = "" if v is None else float(v)
-
+ 
         # Limpa só a área de dados (à direita), preservando os gráficos
         ws.batch_clear([f"{rowcol_to_a1(1, _GRAF_MARCA_COL + 1)}:{rowcol_to_a1(ws.row_count, ws.col_count)}"])
         ws.update(values=matriz, range_name=rowcol_to_a1(1, _GRAF_MARCA_COL + 1),
                   value_input_option="RAW")   # RAW: rótulos como "14:00" ou "07/10" ficam como texto
-
+ 
         # Cria só os gráficos que ainda não existem e já têm dados
         meta = sh.fetch_sheet_metadata(
             params={"fields": "sheets(properties(title),charts(spec(title)))"})
@@ -1546,61 +1605,61 @@ def _atualizar_aba_graficos(sh, dados):
             if not any(v is not None for s in sers for v in s[2]):
                 continue
             novos.append(_spec_grafico_linha(ws.id, g, col, sers, pos))
-
+ 
         if novos:
             sh.batch_update({"requests": novos})
             log.info(f"{len(novos)} gráfico(s) criado(s) na aba 'Gráficos'.")
         else:
             log.info("Aba 'Gráficos' atualizada (gráficos já existentes).")
         _marcar_diagnostico("Gráficos (aba)", True, len(graficos), f"{len(novos)} gráfico(s) criado(s)")
-
+ 
     except Exception as e:
         log.exception("Erro ao montar a aba de gráficos")
         _marcar_diagnostico("Gráficos (aba)", False, 0, str(e))
-
+ 
 def exportar_para_sheets(df):
     try:
         import gspread  # noqa: F401 (garante que a lib está instalada)
     except ImportError:
         log.warning("gspread/google-auth não instalados. Verifique o requirements.txt.")
         return
-
+ 
     if not os.path.exists(GSHEETS_CREDENCIAIS):
         log.warning(f"Credenciais não encontradas em {GSHEETS_CREDENCIAIS}. Configure o Secret File no Render.")
         return
-
+ 
     try:
         gc = _obter_cliente_gspread()
         sh = _abrir_planilha(gc)
-
+ 
         if df.empty:
             log.warning("Tabela principal vazia; nada para exportar neste ciclo.")
             return
-
+ 
         # Só as linhas mais recentes de cada fonte, para não estourar o
         # limite de 10 milhões de células da planilha.
         df_todas = df.groupby("Estacao", sort=False, group_keys=False).tail(SHEETS_MAX_LINHAS_TODAS)
         _escrever_aba_com_retry(sh, "Todas", df_todas)
-
+ 
         # Aba com TODOS os gráficos (mesma lista do site e do PDF)
         _atualizar_aba_graficos(sh, obter_graficos(df))
-
+ 
         for fonte in df["Estacao"].unique():
             df_f = df[df["Estacao"] == fonte].tail(SHEETS_MAX_LINHAS_FONTE)
             cols = [c for c in df.columns if df_f[c].notna().any()]
             _escrever_aba_com_retry(sh, fonte[:100], df_f[cols])
-
+ 
         log.info(f"Google Sheets sincronizado: '{GSHEETS_NOME}'")
     except Exception:
         log.exception("Erro ao exportar para Google Sheets")
-
+ 
 # ==========================================================
 # PDF DOS GRÁFICOS (reportlab, desenhado no servidor)
 # ==========================================================
-
+ 
 _cache_pdf = {"dados": None, "bytes": None}
 _cache_pdf_lock = threading.Lock()
-
+ 
 def _garantir_reportlab():
     """
     Se o reportlab não estiver instalado no servidor, tenta instalar sozinho
@@ -1621,12 +1680,12 @@ def _garantir_reportlab():
     importlib.invalidate_caches()
     import reportlab  # noqa: F401  (se ainda falhar, o ImportError sobe para a rota)
     log.info("reportlab instalado com sucesso.")
-
+ 
 def _desenho_pdf(g, largura):
     """Desenha um gráfico como Drawing do reportlab (mesma geometria do SVG)."""
     from reportlab.graphics.shapes import Circle, Drawing, Line, PolyLine, Polygon, Rect, String
     from reportlab.lib import colors
-
+ 
     prep = _preparar_grafico(g)
     if prep is None:
         return None
@@ -1636,13 +1695,13 @@ def _desenho_pdf(g, largura):
     pw, ph, n = W - L - R, H - T - B, len(rotulos)
     un, casas = g["un"], g["casas"]
     cinza, escuro = colors.HexColor("#666666"), colors.HexColor("#333333")
-
+ 
     def x(i):
         return L + (pw / 2 if n == 1 else i * pw / (n - 1))
-
+ 
     def y(v):                                    # eixo Y do PDF é de baixo para cima
         return H - (T + ph - (v - ymin) / (ymax - ymin) * ph)
-
+ 
     d = Drawing(W, H)
     d.add(String(W / 2, H - 22, _titulo_completo(g), textAnchor="middle", fontSize=15,
                  fontName="Helvetica-Bold", fillColor=escuro))
@@ -1657,7 +1716,7 @@ def _desenho_pdf(g, largura):
         if i % passo == 0:
             d.add(String(x(i), B - 16, str(r), textAnchor="middle", fontSize=12,
                          fontName="Helvetica", fillColor=cinza))
-
+ 
     for it in series:
         cor, vals, trac = colors.HexColor(it[1]), it[2], _eh_tracejada(it)
         dash, forma = _estilo_serie(series, it)
@@ -1685,7 +1744,7 @@ def _desenho_pdf(g, largura):
                                   fillColor=cor, strokeColor=cor))
                 else:
                     d.add(Circle(cx, cy, 3, fillColor=cor, strokeColor=cor))
-
+ 
     lx = L
     for it in series:
         if it[0]:
@@ -1696,23 +1755,23 @@ def _desenho_pdf(g, largura):
             d.add(ln)
             d.add(String(lx + 27, 8, it[0], fontSize=12, fontName="Helvetica", fillColor=escuro))
             lx += 50 + 7 * len(it[0])
-
+ 
     esc = largura / W
     d.width, d.height = W * esc, H * esc
     d.scale(esc, esc)
     return d
-
+ 
 def _gerar_pdf_graficos(dados):
     """PDF com todos os gráficos, por seção. Em cache até a lista de gráficos mudar."""
     with _cache_pdf_lock:
         if _cache_pdf["dados"] is dados and _cache_pdf["bytes"]:
             return _cache_pdf["bytes"]
-
+ 
     _garantir_reportlab()
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
-
+ 
     estilos = getSampleStyleSheet()
     margem = 30
     largura = A4[0] - 2 * margem
@@ -1720,7 +1779,7 @@ def _gerar_pdf_graficos(dados):
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=margem, rightMargin=margem,
                             topMargin=margem, bottomMargin=margem,
                             title="Clima Unificado — Gráficos")
-
+ 
     agora = (ultima_atualizacao or datetime.now()).strftime("%d/%m/%Y às %H:%M")
     historia = [
         Paragraph("Clima Unificado — Gráficos", estilos["Title"]),
@@ -1746,16 +1805,16 @@ def _gerar_pdf_graficos(dados):
             historia.append(dr)
             historia.append(Spacer(1, 8))
     doc.build(historia)
-
+ 
     pdf = buf.getvalue()
     with _cache_pdf_lock:
         _cache_pdf["dados"], _cache_pdf["bytes"] = dados, pdf
     return pdf
-
+ 
 # ==========================================================
 # ATUALIZAÇÃO DE DADOS
 # ==========================================================
-
+ 
 def atualizar_dados(forcar_inmet=False):
     global tabela, ultima_atualizacao
     log.info("Iniciando ciclo de atualização dos dados...")
@@ -1767,7 +1826,7 @@ def atualizar_dados(forcar_inmet=False):
             log.info(f"Atualização concluída: {len(tabela)} registros.")
         else:
             log.warning("A atualização não trouxe dados novos; mantendo a tabela anterior.")
-
+ 
     # Open-Meteo histórico é leve (1 chamada a cada 6 h): roda aqui para já
     # entrar nos gráficos do Sheets. O ZIP do INMET (pesado, 1x/dia) fica em
     # segundo plano e aparece no ciclo seguinte.
@@ -1776,25 +1835,25 @@ def atualizar_dados(forcar_inmet=False):
     except Exception as e:
         log.error(f"Erro no histórico do Open-Meteo: {e}")
     threading.Thread(target=_atualizar_historico_inmet, daemon=True).start()
-
+ 
     if GSHEETS_ATIVO:
         with tabela_lock:
             df_copia = tabela.copy()
         exportar_para_sheets(df_copia)
-
+ 
 # ==========================================================
 # AGENDADOR
 # ==========================================================
-
+ 
 MINUTO_ATUALIZACAO = 7   # evita a hora cheia, quando os IPs compartilhados do Render lotam o Open-Meteo
-
+ 
 def proxima_execucao():
     agora = datetime.now()
     alvo  = agora.replace(minute=MINUTO_ATUALIZACAO, second=0, microsecond=0)
     while alvo <= agora:
         alvo += timedelta(hours=INTERVALO_ATUALIZACAO_HORAS)
     return alvo
-
+ 
 def agendador():
     while True:
         alvo     = proxima_execucao()
@@ -1805,13 +1864,13 @@ def agendador():
             atualizar_dados()
         except Exception:
             log.exception("Erro inesperado no ciclo de atualização")
-
+ 
 # ==========================================================
 # FLASK
 # ==========================================================
-
+ 
 app = Flask(__name__)
-
+ 
 def _html_graficos(df):
     """Conteúdo da aba "📈 Gráficos": botão de PDF + todas as seções."""
     dados = obter_graficos(df)
@@ -1835,25 +1894,25 @@ def _html_graficos(df):
             html += '<p class="resumo">' + " &nbsp;|&nbsp; ".join(dados["notas"][secao]) + "</p>"
         html += "".join(f'<div class="graf">{s}</div>' for s in svgs)
     return html
-
+ 
 @app.route("/")
 def inicio():
     with tabela_lock:
         df_atual = tabela.copy()
-
+ 
     if df_atual.empty:
         return ('<meta charset="UTF-8"><meta http-equiv="refresh" content="10">'
                 '<h1>Buscando os dados pela primeira vez... a página atualiza sozinha.</h1>')
-
+ 
     # As duas abas do Open-Meteo aparecem sempre, mesmo se a coleta falhou
     fixas       = ["Open-Meteo – Hoje (horário)", "Open-Meteo – Previsão (diária)"]
     fontes      = fixas + [f for f in df_atual["Estacao"].unique() if f not in fixas]
     fonte_ativa = flask_request.args.get("fonte", "todas")
     eh_graf     = fonte_ativa == "graficos"
-
+ 
     df_exibir = df_atual if fonte_ativa in ("todas", "graficos") else \
                 df_atual[df_atual["Estacao"] == fonte_ativa]
-
+ 
     if eh_graf:
         conteudo = _html_graficos(df_atual)
     elif df_exibir.empty:
@@ -1873,7 +1932,7 @@ def inicio():
         linhas_html    = gerar_linhas(df_exibir[colunas_mostrar].fillna("—").head(500))
         conteudo = (f'<div class="wrapper"><table><thead><tr>{cabecalho_html}</tr></thead>'
                     f'<tbody>{linhas_html}</tbody></table></div>')
-
+ 
     botoes = f'<a href="/" class="btn btn-todas {"btn-ativo" if fonte_ativa=="todas" else ""}">🌐 Todas</a>\n'
     botoes += f'<a href="/?fonte=graficos" class="btn src-om-hora {"btn-ativo" if eh_graf else ""}">📈 Gráficos</a>\n'
     icones = {
@@ -1891,17 +1950,17 @@ def inicio():
         ico   = icones.get(fonte, "")
         url   = f"/?fonte={requests.utils.quote(fonte)}"
         botoes += f'<a href="{url}" class="btn {css} {ativo}">{ico} {fonte}</a>\n'
-
+ 
     # Botão da estação em 3D (diagnóstico dos sensores)
     botoes += '<a href="/estacao-3d" class="btn" style="background:#2e7d32;color:#fff;">🛰️ NOSSA ESTAÇÃO</a>\n'
-
+ 
     total   = len(df_atual)
     exibido = 0 if eh_graf else min(500, len(df_exibir))
     rodape_atualizacao = (
         ultima_atualizacao.strftime("%d/%m/%Y às %H:%M:%S")
         if ultima_atualizacao else "—"
     )
-
+ 
     banner_sheets = ""
     if GSHEETS_ATIVO:
         banner_sheets = f"""
@@ -1910,13 +1969,13 @@ def inicio():
             <a href="{GSHEETS_LINK}" target="_blank"><strong>Abrir planilha →</strong></a>
             &nbsp;|&nbsp; os mesmos gráficos do site estão na aba <strong>Gráficos</strong>.
         </div>"""
-
+ 
     banner_comunidade = """
     <div class="banner-add">
         🙋 Tem dados meteorológicos próprios? &nbsp;
         <a href="/adicionar"><strong>Envie um CSV com seus dados →</strong></a>
     </div>"""
-
+ 
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1926,21 +1985,21 @@ def inicio():
         body {{ font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }}
         h1   {{ color: #1565C0; margin-bottom: 4px; }}
         p    {{ margin: 4px 0 14px; color: #555; font-size: 13px; }}
-
+ 
         .banner-gs {{
             background: #E8F5E9; border: 1px solid #A5D6A7;
             border-radius: 8px; padding: 10px 16px; margin-bottom: 14px;
             font-size: 13px; color: #1B5E20;
         }}
         .banner-gs a {{ color: #1B5E20; }}
-
+ 
         .banner-add {{
             background: #EDE7F6; border: 1px solid #B39DDB;
             border-radius: 8px; padding: 10px 16px; margin-bottom: 14px;
             font-size: 13px; color: #4527A0;
         }}
         .banner-add a {{ color: #4527A0; }}
-
+ 
         .filtros {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }}
         .btn {{
             padding: 7px 16px; border-radius: 20px; font-size: 13px;
@@ -1950,13 +2009,13 @@ def inicio():
         .btn:hover  {{ opacity: .8; }}
         .btn-ativo  {{ border-color: #222 !important; }}
         .btn-todas  {{ background: #e0e0e0; color: #333; }}
-
+ 
         .btn-pdf {{
             display: inline-block; background: #C62828; color: white; text-decoration: none;
             padding: 9px 20px; border-radius: 20px; font-size: 13px; font-weight: bold;
         }}
         .btn-pdf:hover {{ opacity: .85; }}
-
+ 
         .src-om-hora        {{ background: #B3E5FC; color: #01579B; }}
         .src-om-prev        {{ background: #C5CAE9; color: #1A237E; }}
         .src-estacao-meteo  {{ background: #FFE0B2; color: #E65100; }}
@@ -1964,12 +2023,12 @@ def inicio():
         .src-sm-auto        {{ background: #FFF9C4; color: #E65100; }}
         .src-sm-conv        {{ background: #F8BBD0; color: #880E4F; }}
         .src-comunidade     {{ background: #D1C4E9; color: #4527A0; }}
-
+ 
         .msg-vazio {{ background: #FFF3E0; border: 1px solid #FFCC80; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #E65100; max-width: 900px; }}
         .sec {{ color: #1565C0; font-size: 17px; margin: 22px 0 6px; max-width: 900px; }}
         .resumo {{ font-size: 12px; color: #333; max-width: 900px; margin: -6px 0 16px; }}
         .graf {{ background: white; border-radius: 8px; padding: 12px; margin-bottom: 16px; max-width: 900px; }}
-
+ 
         .wrapper {{ overflow-x: auto; }}
         table    {{ border-collapse: collapse; width: 100%; font-size: 12px; background: white; min-width: 900px; }}
         thead th {{
@@ -1977,7 +2036,7 @@ def inicio():
             position: sticky; top: 0; white-space: nowrap;
         }}
         td {{ border: 1px solid #ddd; padding: 5px 6px; text-align: center; white-space: nowrap; }}
-
+ 
         tr.src-om-hora       td {{ background: #E1F5FE; }}
         tr.src-om-prev       td {{ background: #E8EAF6; }}
         tr.src-estacao-meteo td {{ background: #FFF3E0; }}
@@ -1993,18 +2052,18 @@ def inicio():
        Exibindo: <strong>{exibido}</strong> &nbsp;|&nbsp;
        Fonte: <strong>{fonte_ativa}</strong> &nbsp;|&nbsp;
        Última atualização: <strong>{rodape_atualizacao}</strong></p>
-
+ 
     {banner_sheets}
     {banner_comunidade}
-
+ 
     <div class="filtros">
         {botoes}
     </div>
-
+ 
     {conteudo}
 </body>
 </html>"""
-
+ 
 @app.route("/graficos.pdf")
 def baixar_pdf_graficos():
     """Baixa um PDF com todos os gráficos do site."""
@@ -2026,7 +2085,7 @@ def baixar_pdf_graficos():
     nome = f"graficos-clima-{date.today().isoformat()}.pdf"
     return Response(pdf, mimetype="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename={nome}"})
-
+ 
 def _data_mais_recente_por_fonte(df):
     """
     Para cada fonte, acha a data/hora mais recente nos dados. Reconhece
@@ -2036,7 +2095,7 @@ def _data_mais_recente_por_fonte(df):
     resultado = {}
     if df.empty:
         return resultado
-
+ 
     for fonte in df["Estacao"].unique():
         df_f = df[df["Estacao"] == fonte]
         col_data = encontrar_coluna(df_f.columns, "DATA") or encontrar_coluna(df_f.columns, "DT", "MEDICAO")
@@ -2054,7 +2113,7 @@ def _data_mais_recente_por_fonte(df):
         except Exception as e:
             resultado[fonte] = f"erro ao calcular: {e}"
     return resultado
-
+ 
 @app.route("/adicionar", methods=["GET", "POST"])
 def adicionar_dado():
     """
@@ -2062,18 +2121,18 @@ def adicionar_dado():
     meteorológicos próprios (qualquer conjunto de colunas). As linhas
     válidas vão para a aba "Dados da Comunidade" e entram na tabela
     unificada.
-
+ 
     ATENÇÃO: não há login nem validação de veracidade. Os dados aparecem
     identificados como "Dados da Comunidade" (autodeclarados).
     """
     erro        = None
     sucesso_qtd = None
     ignoradas   = 0
-
+ 
     if flask_request.method == "POST":
         nome    = flask_request.form.get("nome", "").strip()
         arquivo = flask_request.files.get("arquivo")
-
+ 
         if not arquivo or arquivo.filename == "":
             erro = "Selecione um arquivo .csv para enviar."
         elif not arquivo.filename.lower().endswith(".csv"):
@@ -2093,7 +2152,7 @@ def adicionar_dado():
             except Exception as e:
                 log.error(f"Erro ao processar CSV da comunidade: {e}")
                 erro = "Não foi possível ler esse arquivo. Confira o formato (CSV) e tente novamente."
-
+ 
     mensagem_html = ""
     if sucesso_qtd is not None:
         extra = f" ({ignoradas} linha(s) ignorada(s) por estarem vazias)" if ignoradas else ""
@@ -2103,9 +2162,9 @@ def adicionar_dado():
         )
     elif erro:
         mensagem_html = f'<div class="msg msg-erro">⚠️ {erro}</div>'
-
+ 
     colunas_modelo = "".join(f"<li>{c}</li>" for c in CAMPOS_COMUNIDADE)
-
+ 
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2149,19 +2208,19 @@ def adicionar_dado():
        Qualquer CSV é aceito — pode ter as colunas que você já tiver, com o nome que já tiver;
        não é preciso adaptar o arquivo a um formato específico. Cada linha do arquivo vira um
        registro na tabela, identificado como "Dados da Comunidade".</p>
-
+ 
     {mensagem_html}
-
+ 
     <form method="POST" action="/adicionar" enctype="multipart/form-data">
         <label>Nome ou apelido (usado se o CSV não tiver essa coluna)</label>
         <input type="text" name="nome" placeholder="Opcional">
-
+ 
         <label>Arquivo CSV</label>
         <input type="file" name="arquivo" accept=".csv" required>
-
+ 
         <button type="submit">Enviar CSV</button>
     </form>
-
+ 
     <div class="modelo">
         Nenhuma coluna é obrigatória — pode enviar seu CSV do jeito que ele já está.
         Se o arquivo tiver colunas parecidas com estas (sem precisar ser o nome exato — sem
@@ -2173,7 +2232,7 @@ def adicionar_dado():
     </div>
 </body>
 </html>"""
-
+ 
 @app.route("/modelo-comunidade.csv")
 def modelo_comunidade_csv():
     """CSV de exemplo com o cabeçalho esperado."""
@@ -2188,15 +2247,15 @@ def modelo_comunidade_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=modelo-dados-comunidade.csv"},
     )
-
+ 
 # ==========================================================
 # ESTAÇÃO 3D — diagnóstico visual dos sensores (verde = OK, vermelho = problema)
 # ==========================================================
 # /estacao-3d          -> página com a estação em 3D (gira, aproxima, toque nos sensores)
 # /api/estacao-status  -> JSON com o status mais recente de cada sensor, lido da
-#                         aba "Estação Meteorológica" (colunas "Status ...").
+#                         base minuto a minuto da Estação Meteorológica (colunas "Status ...").
 # A página consulta a API a cada 60 s, então as cores acompanham o ciclo do app.
-
+ 
 ESTACAO_SENSORES = {
     "dht22":  {"chaves": ("DHT22",),           "valores": ("TEMP", "UMID")},
     "bmp280": {"chaves": ("BMP280",),          "valores": ("PRESS",)},
@@ -2205,18 +2264,14 @@ ESTACAO_SENSORES = {
     "biruta": {"chaves": ("BIRUTA",),          "valores": ("DIREC", "DIREÇ")},
     "nivel":  {"chaves": ("NIVEL", "NÍVEL"),   "valores": ("NIVEL", "NÍVEL")},
 }
-
+ 
 def _status_estacao():
     vazio = {"sensores": {}, "leitura": None}
-    with tabela_lock:
-        df = tabela.copy()
-    if df.empty or "Estacao" not in df.columns:
-        return vazio
-    df = df[df["Estacao"] == "Estação Meteorológica"].dropna(axis=1, how="all")
+    df = _estacao_completa.dropna(axis=1, how="all")
     if df.empty:
         return vazio
-
-    linha = df.iloc[-1]  # última linha da aba = leitura mais recente
+ 
+    linha = df.iloc[-1]  # leitura mais recente (minuto a minuto)
     sensores = {}
     for sid, cfg in ESTACAO_SENSORES.items():
         col_status = next(
@@ -2229,7 +2284,7 @@ def _status_estacao():
         bruto  = str(linha[col_status]).strip()
         up     = bruto.upper()
         estado = "ok" if up == "OK" else ("erro" if up in ("ERRO", "TRAVADO") else "desc")
-
+ 
         valores = {}
         for c in df.columns:
             nome = str(c).upper()
@@ -2242,20 +2297,20 @@ def _status_estacao():
             if len(valores) >= 3:
                 break
         sensores[sid] = {"estado": estado, "rotulo": bruto, "valores": valores}
-
+ 
     col_d = encontrar_coluna(df.columns, "DATA")
     col_h = encontrar_coluna(df.columns, "HORA")
     leitura = " ".join(str(linha[c]) for c in (col_d, col_h) if c)
     return {"sensores": sensores, "leitura": leitura or None}
-
+ 
 @app.route("/api/estacao-status")
 def api_estacao_status():
     return jsonify(_status_estacao())
-
+ 
 @app.route("/estacao-3d")
 def estacao_3d():
     return ESTACAO_3D_HTML
-
+ 
 ESTACAO_3D_HTML = r"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -2287,7 +2342,7 @@ const COR={ok:0x2ecc71,erro:0xe53935,desc:0x9e9e9e};
 const HEX={ok:"#2ecc71",erro:"#e53935",desc:"#9e9e9e"};
 const TXT={ok:"#1b8f4a",erro:"#c62828",desc:"#666"};
 let dados={sensores:{}},sel=null,alvo=null;
-
+ 
 const cv=document.getElementById("c");
 const R=new THREE.WebGLRenderer({canvas:cv,antialias:true});
 R.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
@@ -2298,7 +2353,7 @@ ctl.target.set(0,1.6,0);ctl.maxPolarAngle=1.5;ctl.minDistance=1.2;ctl.maxDistanc
 S.add(new THREE.HemisphereLight(0xffffff,0x557744,.9));
 const sol=new THREE.DirectionalLight(0xffffff,.9);sol.position.set(4,7,5);sol.castShadow=true;sol.shadow.mapSize.set(2048,2048);
 Object.assign(sol.shadow.camera,{left:-4,right:4,top:4,bottom:-4,near:1,far:20});sol.shadow.camera.updateProjectionMatrix();sol.shadow.bias=-.0005;S.add(sol);R.shadowMap.enabled=true;
-
+ 
 const mat=(c,o)=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.65},o||{}));
 const PRETO=mat(0x161616),BRANCO=mat(0xf4f4f2),METAL=mat(0x9aa0a6,{metalness:.6,roughness:.4});
 const B=(w,h,d)=>new THREE.BoxGeometry(w,h,d);
@@ -2309,7 +2364,7 @@ function tubo(a,b,s,m){const d=new THREE.Vector3().subVectors(b,a);const o=new T
   o.position.copy(a).addScaledVector(d,.5);o.quaternion.setFromUnitVectors(V(0,1,0),d.clone().normalize());o.castShadow=true;S.add(o);return o}
 function tex(w,h,fn){const c=document.createElement("canvas");c.width=w;c.height=h;fn(c.getContext("2d"),w,h);return new THREE.CanvasTexture(c)}
 function plano(w,h,t,x,y,z){const o=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshBasicMaterial({map:t}));o.position.set(x,y,z);S.add(o);return o}
-
+ 
 /* cenário: gramado, terra e prédio com faixa azul ao fundo */
 const chao=add(new THREE.CircleGeometry(20,48),mat(0x6f8f3a,{roughness:1}),0,0,0);chao.rotation.x=-Math.PI/2;chao.castShadow=false;
 [[-3,-2.5,1.3],[2.8,-3.5,1.7]].forEach(p=>{const t=add(new THREE.CircleGeometry(p[2],24),mat(0x9a5a3c,{roughness:1}),p[0],.005,p[1]);t.rotation.x=-Math.PI/2;t.castShadow=false});
@@ -2318,7 +2373,7 @@ add(B(24,.4,.5),mat(0x1f4fa8),0,3.95,-6.85);
 for(let r=0;r<2;r++)for(let i=-4;i<=4;i++){
   add(B(1.9,1,.05),mat(0xf4f4f4),i*2.6,1+r*1.5,-6.82);
   add(B(1.78,.88,.06),mat(0x34495c,{roughness:.15,metalness:.3}),i*2.6,1+r*1.5,-6.8)}
-
+ 
 /* mastro quadrado preto, tripé de tubo quadrado, bandeja da bateria */
 add(B(.05,2.95,.05),PRETO,0,1.525,0);
 add(B(.06,.01,.06),PRETO,0,3.005,0);
@@ -2328,7 +2383,7 @@ add(B(.34,.02,.28),PRETO,0,.9,.14);
 add(B(.34,.04,.01),PRETO,0,.93,.275);
 add(B(.01,.04,.28),PRETO,-.165,.93,.14);add(B(.01,.04,.28),PRETO,.165,.93,.14);
 tubo(V(.03,2.92,0),V(.03,1.4,.04),.008,PRETO);                 /* cabo descendo pelo mastro */
-
+ 
 /* bateria Freedom DF700 com tampa branca e cinta preta */
 const texBat=tex(256,128,(g,w,h)=>{g.fillStyle="#111";g.fillRect(0,0,w,h);g.fillStyle="#fff";g.font="italic bold 38px Arial";
   g.fillText("FREEDOM",12,48);g.font="14px Arial";g.fillText("ESTACIONÁRIA",14,70);g.fillStyle="#d8232a";g.fillRect(150,84,100,6);
@@ -2338,7 +2393,7 @@ plano(.2,.1,texBat,0,.99,.2105);
 add(B(.02,.176,.174),PRETO,-.06,.995,.125);
 add(B(.27,.025,.19),BRANCO,0,1.0925,.125);
 add(B(.272,.007,.192),PRETO,0,1.095,.125);
-
+ 
 /* caixa Brasiltec com tampa transparente: controlador solar, placa e cabos por dentro */
 const texCtl=tex(128,80,(g,w,h)=>{g.fillStyle="#2c7fd6";g.fillRect(0,0,w,h);g.fillStyle="#cfe0d0";g.fillRect(40,14,50,30);
   g.fillStyle="#222";g.font="bold 22px Arial";g.fillText("14.3V",44,38);g.fillStyle="#fff";g.font="7px Arial";
@@ -2358,7 +2413,7 @@ add(new THREE.TorusGeometry(.065,.003,6,28),mat(0x62aee0),-.02,1.19,.115);
 add(new THREE.TorusGeometry(.075,.0035,6,28),mat(0x6b4a3a),.01,1.16,.118);
 add(B(.02,.1,.002),mat(0xe0cfa0),.01,1.19,.122).rotation.z=.55;
 add(new THREE.SphereGeometry(.004,8,6),new THREE.MeshBasicMaterial({color:0x3a6bff}),0,1.225,.11);
-
+ 
 /* painel solar inclinado, no lado oposto da caixa, com moldura preta */
 const texPv=tex(128,160,(g,w,h)=>{g.fillStyle="#1d3b8a";g.fillRect(0,0,w,h);g.strokeStyle="#8fb0e8";g.lineWidth=1.5;
   for(let i=0;i<=6;i++){g.beginPath();g.moveTo(i*w/6,0);g.lineTo(i*w/6,h);g.stroke()}
@@ -2369,7 +2424,7 @@ add(B(.38,.018,.3),mat(0x1f3b8f,{metalness:.3,roughness:.3}),0,.002,-.15,pg);
 const pv=new THREE.Mesh(new THREE.PlaneGeometry(.36,.28),new THREE.MeshStandardMaterial({map:texPv,roughness:.3,metalness:.2}));
 pv.rotation.x=-Math.PI/2;pv.position.set(0,.0115,-.15);pg.add(pv);
 [-.1,.1].forEach(x=>tubo(V(x,1.5,-.03),V(x,1.4,-.25),.012,PRETO));
-
+ 
 /* abraçadeiras, suporte do pluviômetro e haste do braço do anemômetro */
 add(B(.062,.022,.062),METAL,0,1.74,0);
 add(B(.062,.022,.062),METAL,0,1.67,0);
@@ -2377,14 +2432,14 @@ add(B(.07,.014,.14),BRANCO,0,1.74,.1);
 add(B(.45,.022,.03),BRANCO,-.225,2.95,0);
 add(B(.07,.04,.07),BRANCO,0,2.96,0);
 add(C(.02,.02,.2,12),PRETO,-.45,2.95,0);
-
+ 
 /* sensores: cada um é um grupo com um "halo" colorido (verde/vermelho) */
 const SN={};
 function novo(id,x,y,z,r){const g=new THREE.Group();g.position.set(x,y,z);g.userData.id=id;
   const h=new THREE.Mesh(new THREE.SphereGeometry(r,16,12),new THREE.MeshBasicMaterial({color:COR.desc,transparent:true,opacity:.28,depthWrite:false}));
   g.add(h);S.add(g);SN[id]={g:g,h:h,mats:[],giro:null,estado:"desc"};return SN[id]}
 function parte(id,geo,cor,x,y,z,pai){const m=mat(cor);SN[id].mats.push(m);return add(geo,m,x,y,z,pai||SN[id].g)}
-
+ 
 /* anemômetro (conchas) no alto, na ponta do braço branco */
 let s=novo("anem",-.45,3.07,0,.11);
 parte("anem",C(.022,.03,.07,16),0x1a1a1a,0,-.02,0);
@@ -2393,14 +2448,14 @@ parte("anem",C(.005,.005,.03,8),0xcccccc,0,.01,0,rot);
 for(let k=0;k<3;k++){const a=k*2*Math.PI/3,c=Math.cos(a),n=Math.sin(a);
   parte("anem",B(.07,.006,.006),0xe8e8e8,c*.035,0,n*.035,rot).rotation.y=-a;
   parte("anem",new THREE.SphereGeometry(.026,12,8,0,Math.PI*2,0,Math.PI/2),0xffffff,c*.07,0,n*.07,rot).rotation.x=Math.PI/2}
-
+ 
 /* biruta logo abaixo do anemômetro: aleta larga + haste */
 s=novo("biruta",-.45,2.86,0,.1);
 parte("biruta",C(.022,.018,.06,16),0x1a1a1a,0,.02,0);
 const sw=new THREE.Group();sw.position.y=-.02;s.g.add(sw);s.giro=sw;
 parte("biruta",B(.22,.008,.008),0xf2f2f2,.02,0,0,sw);
 parte("biruta",B(.075,.045,.004),0xffffff,-.08,0,0,sw);
-
+ 
 /* pluviômetro branco no suporte em L, com etiqueta azul */
 s=novo("pluv",0,1.84,.125,.14);
 parte("pluv",C(.06,.06,.17,28),0xffffff,0,0,0);
@@ -2408,38 +2463,38 @@ parte("pluv",C(.078,.078,.022,28),0xeeeeea,0,.085,0);
 add(C(.062,.062,.003,28),PRETO,0,.097,0,s.g);
 add(B(.002,.02,.05),mat(0x1f5fbf),.061,-.025,0,s.g);
 add(C(.008,.008,.002,16),mat(0x2aa84a),.062,-.025,.015,s.g).rotation.z=Math.PI/2;
-
+ 
 /* DHT22 dentro do abrigo anti-radiação (pratos empilhados) */
 s=novo("dht22",0,1.63,.09,.11);
 for(let k=0;k<5;k++)parte("dht22",C(.032,.062,.012,24),0xffffff,0,.04-k*.02,0);
 parte("dht22",C(.012,.012,.1,10),0xdddddd,0,0,0);
 add(B(.03,.018,.05),BRANCO,0,.04,-.05,s.g);
 add(B(.02,.13,.004),BRANCO,0,-.1,-.062,s.g);
-
+ 
 /* BMP280 na placa, dentro da caixa */
 s=novo("bmp280",.045,1.165,.108,.06);
 parte("bmp280",B(.02,.02,.006),0xb8bcc2,0,0,0);
-
+ 
 /* nível: halo na bateria (ver observação na resposta) */
 novo("nivel",0,.995,.125,.19);
-
+ 
 /* lista de botões */
 const lista=document.getElementById("lista"),info=document.getElementById("info"),chips={};
 Object.keys(NOMES).forEach(id=>{const d=document.createElement("div");d.className="chip";
   d.innerHTML="<i></i>"+NOMES[id].split(" · ")[0];d.onclick=()=>selecionar(id);lista.appendChild(d);chips[id]=d});
-
+ 
 function esc(t){return String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-
+ 
 function mostrar(id){const d=dados.sensores[id],st=d?d.estado:"desc";
   info.style.borderLeftColor=HEX[st];
   const simb=st==="ok"?"✔ ":st==="erro"?"✖ ":"? ";
   let h="<b>"+NOMES[id]+"</b><br><span style=\"color:"+TXT[st]+";font-weight:bold\">"+(d?simb+esc(d.rotulo||"sem status"):"Sem dado na planilha")+"</span>";
   if(d)for(const k in d.valores)h+="<br>"+esc(k)+": "+esc(d.valores[k]);
   info.innerHTML=h}
-
+ 
 function selecionar(id){sel=id;mostrar(id);alvo=SN[id].g.position.clone();
   for(const k in SN)SN[k].h.scale.setScalar(k===id?1.35:1)}
-
+ 
 function aplicar(){let ok=0,tot=0;
   for(const id in SN){const d=dados.sensores[id],st=d?d.estado:"desc",c=COR[st],x=SN[id];x.estado=st;
     x.h.material.color.setHex(c);
@@ -2448,12 +2503,12 @@ function aplicar(){let ok=0,tot=0;
     if(d){tot++;if(st==="ok")ok++}}
   document.getElementById("resumo").textContent=tot?(ok+" de "+tot+" sensores OK"+(dados.leitura?" · leitura: "+dados.leitura:"")):"Sem dados da estação";
   if(sel)mostrar(sel)}
-
+ 
 async function carregar(){
   try{const r=await fetch("/api/estacao-status");dados=await r.json()}catch(e){dados={sensores:{}}}
   aplicar()}
 carregar();setInterval(carregar,60000);
-
+ 
 /* toque/clique num sensor (ignora arrastes) */
 const ray=new THREE.Raycaster(),pt=new THREE.Vector2();let p0=null;
 cv.addEventListener("pointerdown",e=>{p0=[e.clientX,e.clientY]});
@@ -2462,10 +2517,10 @@ cv.addEventListener("pointerup",e=>{
   pt.set(e.clientX/innerWidth*2-1,-(e.clientY/innerHeight)*2+1);ray.setFromCamera(pt,cam);
   const hit=ray.intersectObjects(Object.values(SN).map(v=>v.g),true)[0];
   if(hit){let o=hit.object;while(o&&!(o.userData&&o.userData.id))o=o.parent;if(o)selecionar(o.userData.id)}});
-
+ 
 function ajustar(){const w=innerWidth,h=innerHeight;R.setSize(w,h,false);cam.aspect=w/h;cam.fov=w<h?62:45;cam.updateProjectionMatrix()}
 addEventListener("resize",ajustar);ajustar();
-
+ 
 const t0=performance.now();
 (function anima(){requestAnimationFrame(anima);const t=(performance.now()-t0)/1000;
   if(SN.anem.estado==="ok")SN.anem.giro.rotation.y+=.08;          /* travado = parado */
@@ -2477,7 +2532,7 @@ const t0=performance.now();
 </script>
 </body>
 </html>"""
-
+ 
 @app.route("/status")
 def status():
     """
@@ -2492,7 +2547,7 @@ def status():
         "dado_mais_recente_por_fonte": _data_mais_recente_por_fonte(df_atual),
         "total_registros": len(df_atual),
     }
-
+ 
 @app.route("/atualizar")
 def forcar_atualizacao():
     """
@@ -2505,7 +2560,7 @@ def forcar_atualizacao():
     if forcar_inmet:
         mensagem += " Cache de reserva (ZIP) forçado a reprocessar, se for usado."
     return {"ok": True, "mensagem": mensagem}
-
+ 
 def gerar_linhas(df):
     html = ""
     for _, row in df.iterrows():
@@ -2514,21 +2569,23 @@ def gerar_linhas(df):
         celulas = "".join(f"<td>{v}</td>" for v in row)
         html   += f'<tr class="row {css}">{celulas}</tr>\n'
     return html
-
+ 
 # ==========================================================
 # EXECUÇÃO PRINCIPAL
 # ==========================================================
-
+ 
 if __name__ == "__main__":
     log.info("Buscando dados iniciais (em segundo plano)...")
     # Em segundo plano: o servidor abre a porta logo, sem esperar a
     # primeira coleta + exportação para o Sheets terminar.
     threading.Thread(target=atualizar_dados, daemon=True).start()
-
+ 
     threading.Thread(target=agendador, daemon=True).start()
-
+ 
     porta = int(os.environ.get("PORT", 5000))
     log.info(f"Servidor iniciado na porta {porta}")
     if GSHEETS_ATIVO:
         log.info(f"PLANILHA GOOGLE SHEETS: {GSHEETS_LINK}")
     app.run(host="0.0.0.0", port=porta, threaded=True)
+ 
+Claude terminou a resposta
