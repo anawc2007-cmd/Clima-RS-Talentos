@@ -164,27 +164,60 @@ def criar_sessao():
 
 sessao_http = criar_sessao()
 
-def _get_open_meteo(url, tentativas=3):
+_om_cache = {}                       # url -> (datetime, json) da última resposta boa
+_om_cache_lock = threading.Lock()
+_om_chamada_lock = threading.Lock()  # uma chamada por vez (o 429 é por IP compartilhado)
+_om_ultima_chamada = 0.0
+OM_CACHE_MAX_HORAS = 24              # idade máxima do dado antigo usado como reserva
+OM_CACHE_FRESCO_MIN = 50             # dentro desse prazo nem chama a API de novo
+
+def _get_open_meteo(url, tentativas=4):
     """
     GET no Open-Meteo com paciência: o IP do Render gratuito é compartilhado e
-    o Open-Meteo responde 429 (limite) com frequência. Espera cada vez mais.
+    o Open-Meteo responde 429 (limite) com frequência.
+    - Resposta recente (< OM_CACHE_FRESCO_MIN) é reaproveitada sem chamar a API.
+    - Chamadas são espaçadas (uma por vez, >= 3 s entre elas).
+    - Se todas as tentativas falharem, devolve a ÚLTIMA resposta boa dessa mesma
+      URL (até OM_CACHE_MAX_HORAS), em vez de deixar o site sem dados. A URL do
+      "hoje" leva a data de hoje, então dado de ontem nunca é reaproveitado.
     """
     import random
+    global _om_ultima_chamada
+
+    with _om_cache_lock:
+        guardado = _om_cache.get(url)
+    if guardado and datetime.now() - guardado[0] < timedelta(minutes=OM_CACHE_FRESCO_MIN):
+        return guardado[1]
+
     ultimo = None
-    for n in range(1, tentativas + 1):
-        try:
-            r = requests.get(url, timeout=30)
-            if r.status_code == 429:
-                ultimo = RuntimeError("Open-Meteo 429 (limite de requisições)")
-                espera = 10 * n + random.randint(0, 5)
-                log.warning(f"Open-Meteo 429; tentativa {n}/{tentativas}, aguardando {espera}s...")
-                time.sleep(espera)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            ultimo = e
-            time.sleep(5 * n)
+    with _om_chamada_lock:
+        for n in range(1, tentativas + 1):
+            falta = 3 - (time.time() - _om_ultima_chamada)
+            if falta > 0:
+                time.sleep(falta)
+            try:
+                r = requests.get(url, timeout=30)
+                _om_ultima_chamada = time.time()
+                if r.status_code == 429:
+                    ultimo = RuntimeError("Open-Meteo 429 (limite de requisições)")
+                    espera = 15 * n + random.randint(0, 8)
+                    log.warning(f"Open-Meteo 429; tentativa {n}/{tentativas}, aguardando {espera}s...")
+                    time.sleep(espera)
+                    continue
+                r.raise_for_status()
+                dados = r.json()
+                with _om_cache_lock:
+                    _om_cache[url] = (datetime.now(), dados)
+                return dados
+            except requests.RequestException as e:
+                _om_ultima_chamada = time.time()
+                ultimo = e
+                time.sleep(5 * n)
+
+    if guardado and datetime.now() - guardado[0] < timedelta(hours=OM_CACHE_MAX_HORAS):
+        idade = int((datetime.now() - guardado[0]).total_seconds() // 60)
+        log.warning(f"Open-Meteo indisponível ({ultimo}); usando a última resposta boa (de {idade} min atrás).")
+        return guardado[1]
     raise ultimo
 
 # ==========================================================
