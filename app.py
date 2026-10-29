@@ -221,6 +221,39 @@ def _get_open_meteo(url, tentativas=4):
     raise ultimo
 
 # ==========================================================
+# RESERVA: LER O OPEN-METEO DA PRÓPRIA PLANILHA
+# ==========================================================
+# Quando a API do Open-Meteo recusa (429), o site lê a aba correspondente
+# da planilha de destino (onde os mesmos dados foram gravados num ciclo
+# anterior). Para "hoje (horário)" só vale dado com a data de hoje.
+
+def _ler_aba_open_meteo(fonte, so_hoje=False):
+    """Devolve DataFrame com a aba da planilha (ou vazio se não houver dado válido)."""
+    if not GSHEETS_ATIVO:
+        return pd.DataFrame()
+    try:
+        gc = _obter_cliente_gspread()
+        sh = _abrir_planilha(gc)
+        registros = sh.worksheet(fonte[:100]).get_all_records()
+        if not registros:
+            return pd.DataFrame()
+        df = pd.DataFrame(registros)
+        texto = {"Estacao", "Data", "Hora", "Nascer do Sol", "Pôr do Sol"}
+        for c in df.columns:
+            if c not in texto:
+                df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False),
+                                      errors="coerce")
+        df["Estacao"] = fonte
+        if so_hoje:
+            df = df[df["Data"].astype(str).str[:10] == date.today().isoformat()]
+        else:
+            df = df[df["Data"].astype(str).str[:10] >= date.today().isoformat()]
+        return df.reset_index(drop=True)
+    except Exception as e:
+        log.error(f"Erro ao ler '{fonte}' da planilha (reserva): {e}")
+        return pd.DataFrame()
+
+# ==========================================================
 # OPEN-METEO: HOJE HORA A HORA
 # ==========================================================
 
@@ -260,6 +293,12 @@ def coletar_om_horario():
         return df
     except Exception as e:
         log.error(f"Erro Open-Meteo horário: {e}")
+        df_res = _ler_aba_open_meteo("Open-Meteo – Hoje (horário)", so_hoje=True)
+        if not df_res.empty:
+            log.warning(f"Open-Meteo horário: usando {len(df_res)} linhas de hoje lidas da planilha.")
+            _marcar_diagnostico("Open-Meteo – Hoje (horário)", True, len(df_res),
+                                f"da planilha (API falhou: {e})")
+            return df_res
         _marcar_diagnostico("Open-Meteo – Hoje (horário)", False, 0, str(e))
         return pd.DataFrame()
 
@@ -302,6 +341,12 @@ def coletar_om_diario():
         return df
     except Exception as e:
         log.error(f"Erro Open-Meteo diário: {e}")
+        df_res = _ler_aba_open_meteo("Open-Meteo – Previsão (diária)")
+        if not df_res.empty:
+            log.warning(f"Open-Meteo diário: usando {len(df_res)} linhas lidas da planilha.")
+            _marcar_diagnostico("Open-Meteo – Previsão (diária)", True, len(df_res),
+                                f"da planilha (API falhou: {e})")
+            return df_res
         _marcar_diagnostico("Open-Meteo – Previsão (diária)", False, 0, str(e))
         return pd.DataFrame()
 
