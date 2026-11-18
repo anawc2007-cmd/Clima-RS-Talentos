@@ -424,8 +424,13 @@ def _reduzir_para_horario(df):
     # Média e mínima da temperatura DENTRO de cada hora (usa as leituras de
     # minuto a minuto; valores fora de -20..60 °C são descartados como erro).
     c_temp = next((c for c, n in norm.items()
-                   if "temperatura" in n
-                   and not any(x in n for x in ("bmp", "max", "min", "orvalho", "status"))), None)
+                   if "temp" in n and "tempo" not in n
+                   and not any(x in n for x in ("bmp", "max", "min", "media", "orvalho", "status"))), None)
+    if c_temp is None:
+        log.warning("Estação: coluna de temperatura não encontrada; colunas média/mínima da hora "
+                    f"não foram criadas. Colunas da planilha: {list(df.columns)}")
+    else:
+        log.info(f"Estação: média/mínima da hora calculadas a partir da coluna '{c_temp}'.")
     if c_temp:
         t = pd.to_numeric(df[c_temp].astype(str).str.replace(",", ".", regex=False), errors="coerce")
         t = t.where((t > -20) & (t < 60))
