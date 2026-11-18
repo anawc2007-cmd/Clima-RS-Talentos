@@ -21,6 +21,10 @@
 #
 # O QUE MUDOU NESTA VERSÃO
 # ─────────────────────────────────────────────────────────
+#  • NOVO: a aba da Estação Meteorológica ganhou as colunas "Temp. Média da
+#    Hora (°C)" e "Temp. Mínima da Hora (°C)" (calculadas sobre as leituras
+#    de minuto a minuto de cada hora). A aba antiga "Diagnóstico" da
+#    planilha é apagada automaticamente no próximo ciclo.
 #  • NOVO: a tabela e o Google Sheets da "Estação Meteorológica" agora
 #    recebem 1 linha POR HORA (a última leitura de cada hora; a chuva é a
 #    soma da hora). As leituras minuto a minuto continuam guardadas só na
@@ -395,7 +399,8 @@ _estacao_completa = pd.DataFrame()   # leituras minuto a minuto (só em memória
 def _reduzir_para_horario(df):
     """
     Mantém 1 linha por hora (a última leitura de cada hora).
-    A chuva da linha vira a SOMA da hora, para não perder precipitação.
+    A chuva da linha vira a SOMA da hora, para não perder precipitação, e
+    entram duas colunas novas: temperatura média e mínima da hora.
     """
     norm = {c: _normalizar_texto(c) for c in df.columns}
     c_data = next((c for c, n in norm.items() if "data" in n), None)
@@ -415,6 +420,19 @@ def _reduzir_para_horario(df):
                               errors="coerce")
                 .groupby(chave).sum(min_count=1))
         reduzido[c_chuva] = chave.loc[reduzido.index].map(soma)
+
+    # Média e mínima da temperatura DENTRO de cada hora (usa as leituras de
+    # minuto a minuto; valores fora de -20..60 °C são descartados como erro).
+    c_temp = next((c for c, n in norm.items()
+                   if "temperatura" in n
+                   and not any(x in n for x in ("bmp", "max", "min", "orvalho", "status"))), None)
+    if c_temp:
+        t = pd.to_numeric(df[c_temp].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+        t = t.where((t > -20) & (t < 60))
+        grp = t.groupby(chave)
+        pos = reduzido.columns.get_loc(c_temp) + 1
+        reduzido.insert(pos, "Temp. Média da Hora (°C)", chave.loc[reduzido.index].map(grp.mean()).round(1))
+        reduzido.insert(pos + 1, "Temp. Mínima da Hora (°C)", chave.loc[reduzido.index].map(grp.min()).round(1))
     return reduzido
 
 def coletar_estacao_meteorologica():
@@ -1680,7 +1698,7 @@ def _atualizar_aba_graficos(sh, dados):
 
 def exportar_para_sheets(df):
     try:
-        import gspread  # noqa: F401 (garante que a lib está instalada)
+        import gspread
     except ImportError:
         log.warning("gspread/google-auth não instalados. Verifique o requirements.txt.")
         return
@@ -1696,6 +1714,15 @@ def exportar_para_sheets(df):
         if df.empty:
             log.warning("Tabela principal vazia; nada para exportar neste ciclo.")
             return
+
+        # Remove a aba antiga "Diagnóstico" (não é mais usada pelo app).
+        try:
+            sh.del_worksheet(sh.worksheet("Diagnóstico"))
+            log.info("Aba antiga 'Diagnóstico' removida da planilha.")
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        except Exception as e:
+            log.warning(f"Não foi possível remover a aba 'Diagnóstico': {e}")
 
         # Só as linhas mais recentes de cada fonte, para não estourar o
         # limite de 10 milhões de células da planilha.
