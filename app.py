@@ -82,6 +82,22 @@ logging.basicConfig(
 log = logging.getLogger("clima")
 
 # ==========================================================
+# DIAGNÓSTICO — registra o resultado de cada coleta, fonte a fonte
+# ==========================================================
+
+_diagnostico_lock = threading.Lock()
+_diagnostico = {}  # fonte -> {"ok": bool, "registros": int, "detalhe": str, "hora": datetime}
+
+def _marcar_diagnostico(fonte, ok, registros=0, detalhe=""):
+    with _diagnostico_lock:
+        _diagnostico[fonte] = {
+            "ok": ok,
+            "registros": registros,
+            "detalhe": detalhe,
+            "hora": datetime.now(),
+        }
+
+# ==========================================================
 # ⚙️  CONFIGURAÇÕES PRINCIPAIS
 # ==========================================================
 
