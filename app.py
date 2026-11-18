@@ -254,7 +254,7 @@ def _ler_aba_open_meteo(fonte, so_hoje=False):
     try:
         gc = _obter_cliente_gspread()
         sh = _abrir_planilha(gc)
-        registros = sh.worksheet(fonte[:100]).get_all_records()
+        registros = sh.worksheet(fonte[:100]).get_all_records(numericise_ignore=["all"])
         if not registros:
             return pd.DataFrame()
         df = pd.DataFrame(registros)
@@ -481,7 +481,7 @@ def coletar_estacao_meteorologica():
         gc = _obter_cliente_gspread()
         sh = gc.open_by_key(ESTACAO_METEO_SHEET_ID)
         ws = sh.worksheet(ESTACAO_METEO_ABA) if ESTACAO_METEO_ABA else sh.sheet1
-        registros = ws.get_all_records()
+        registros = ws.get_all_records(numericise_ignore=["all"])
         if not registros:
             log.warning("Planilha da Estação Meteorológica está vazia.")
             return pd.DataFrame()
@@ -520,7 +520,7 @@ def coletar_dados_comunidade():
             ws = sh.worksheet(DADOS_COMUNIDADE_ABA)
         except gspread.exceptions.WorksheetNotFound:
             return pd.DataFrame()
-        registros = ws.get_all_records()
+        registros = ws.get_all_records(numericise_ignore=["all"])
         if not registros:
             return pd.DataFrame()
         df = pd.DataFrame(registros)
